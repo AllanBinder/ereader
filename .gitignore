@@ -21,3 +21,6 @@ build_pack/
 .idea/
 .DS_Store
 *.swp
+
+# Case files are delivered by email from the build guide signup
+*case*.svg

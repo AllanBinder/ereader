@@ -27,6 +27,9 @@ photos lives at
 Power can be USB only (plug in, read, unplug: the page stays on the glass), or
 a battery; the build guide above covers the options.
 
+Case: the laser-cut acrylic and 3D print case files are sent by email when
+you sign up on the [build guide](https://muonsortes.com/build-a-wifi-ereader).
+
 ## Wiring
 
 This table is `include/pins.h`, which is the single source of truth. Solder
