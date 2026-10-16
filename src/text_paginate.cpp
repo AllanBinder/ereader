@@ -344,6 +344,16 @@ void Pipeline::addParagraph(const std::string &para) {
   paraBase_ += (uint32_t)para.size() + 1;
 }
 
+void Pipeline::paragraph(const std::string &latin1) {
+  if (latin1.empty()) return;
+  addParagraph(latin1);
+}
+
+void Pipeline::endRun() {
+  if (!current_.empty()) emitPage();
+  firstParagraph_ = true;
+}
+
 void Pipeline::emitPage() {
   emitAnchor_ = currentAnchor_;
   if (sink_) sink_(current_);
@@ -362,6 +372,97 @@ void Pipeline::finish() {
   if (pages_ == 0) {
     current_.push_back(std::string());
     emitPage();
+  }
+}
+
+// ------------------------------------------------------------- rejoiner
+
+std::string decodeLatin1(const uint8_t *data, size_t len) {
+  std::string out;
+  out.reserve(len);
+  size_t i = 0;
+  while (i < len) {
+    uint8_t b = data[i];
+    if (b < 0x80) {
+      out.push_back((char)b);
+      i++;
+    } else if ((b & 0xE0) == 0xC0 && i + 1 < len &&
+               (data[i + 1] & 0xC0) == 0x80) {
+      uint32_t cp = ((uint32_t)(b & 0x1F) << 6) | (uint32_t)(data[i + 1] & 0x3F);
+      if (cp >= 0x80 && cp <= 0xFF) out.push_back((char)cp);
+      i += 2;
+    } else {
+      // Not something encodeUtf8() writes: skip the lead byte and any
+      // continuation bytes after it.
+      i++;
+      while (i < len && (data[i] & 0xC0) == 0x80) i++;
+    }
+  }
+  return out;
+}
+
+Rejoiner::Rejoiner(int cols, ParagraphSink sink)
+    : cols_(cols > 0 ? cols : 1), sink_(sink) {}
+
+void Rejoiner::flush() {
+  if (para_.empty()) return;
+  if (sink_) sink_(para_);
+  // One separator character between paragraphs, as in paginate_spans.
+  paraBase_ += (uint32_t)para_.size() + 1;
+  para_.clear();
+  last_.clear();
+}
+
+void Rejoiner::breakRun() { flush(); }
+
+// wrapParagraphSpans emits a hard broken piece as a line of exactly `cols`
+// characters on its own, so it can never hold a space.
+bool Rejoiner::hardBroken(const std::string &line) const {
+  return (int)line.size() == cols_ && line.find(' ') == std::string::npos;
+}
+
+// Across a page boundary: does `next` carry on the paragraph `prev` ended?
+bool Rejoiner::continues(const std::string &prev,
+                         const std::string &next) const {
+  if (hardBroken(prev)) return true;
+  size_t sp = next.find(' ');
+  size_t word = (sp == std::string::npos) ? next.size() : sp;
+  // The wrap would have put a word that fits on the previous line.
+  if (prev.size() + 1 + word <= (size_t)cols_) return false;
+  return true;
+}
+
+void Rejoiner::page(const std::string &latin1) {
+  pageAnchor_ = paraBase_ + (uint32_t)para_.size();
+  bool first = true;
+  size_t pos = 0;
+  while (pos <= latin1.size()) {
+    size_t nl = latin1.find('\n', pos);
+    std::string line = (nl == std::string::npos) ? latin1.substr(pos)
+                                                 : latin1.substr(pos, nl - pos);
+    pos = (nl == std::string::npos) ? latin1.size() + 1 : nl + 1;
+
+    if (line.empty()) {
+      // A blank line is a paragraph break. Pages never start with one, but a
+      // page can end with one (the separator landed on the last row).
+      flush();
+      if (first) pageAnchor_ = paraBase_;
+      first = false;
+      continue;
+    }
+    if (!para_.empty() && first && !continues(last_, line)) flush();
+    if (para_.empty()) {
+      if (first) pageAnchor_ = paraBase_;
+      para_ = line;
+    } else {
+      // Inside a page, consecutive lines are always one paragraph.
+      if (!hardBroken(last_)) para_.push_back(' ');
+      if (first) pageAnchor_ = paraBase_ + (uint32_t)para_.size();
+      para_ += line;
+    }
+    last_ = line;
+    first = false;
+    if (para_.size() > PARAGRAPH_MAX_CHARS) flush();
   }
 }
 

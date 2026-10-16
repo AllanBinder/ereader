@@ -62,6 +62,21 @@ class Pipeline {
   uint32_t pageCount() const { return pages_; }
   bool truncated() const { return truncated_; }
 
+  // Re-pagination entry points (books::reformat). paragraph() adds one
+  // already clean paragraph in the Latin-1 model, skipping the line cleaning
+  // that feed() does (strip, page number filter, dehyphenation), so text that
+  // was paginated once comes out exactly as the host would paginate the same
+  // paragraphs. Do not mix it with feed() in one pipeline.
+  void paragraph(const std::string &latin1);
+  // Ends a run of text the way an image page ends one in
+  // txt2book.pages_for_grid: the partial page is emitted, and the next
+  // paragraph starts a fresh page with no blank line ahead of it. The stream
+  // position carries on, so anchors stay comparable across grids.
+  void endRun();
+  // Position in the logical text stream after the last paragraph added. An
+  // image page inserted here carries this as its anchor.
+  uint32_t streamPos() const { return paraBase_; }
+
   // Anchor of the page currently being handed to the sink: the cumulative
   // character count into the book's logical text stream at the start of that
   // page, which is what an MPG2 page table stores. Only meaningful from inside
@@ -99,6 +114,65 @@ class Pipeline {
   uint32_t paraBase_ = 0;
   uint32_t currentAnchor_ = 0;
   uint32_t emitAnchor_ = 0;
+};
+
+// UTF-8 page blob bytes to the Latin-1 character model. Page blobs only ever
+// hold codepoints up to U+00FF, so anything above that (or malformed) is
+// dropped rather than guessed at.
+std::string decodeLatin1(const uint8_t *data, size_t len);
+
+// Turns the pages of a book paginated on one grid back into the paragraphs
+// they were made from, for re-pagination on another grid. Pages go in one at a
+// time in reading order (lines separated by \n, Latin-1 model) and finished
+// paragraphs come out through the sink, ready for Pipeline::paragraph().
+//
+// What the page format keeps, and so what this can recover:
+//   - a blank line inside a page is a paragraph break, always;
+//   - consecutive lines of one page belong to one paragraph, joined with one
+//     space, except after a hard broken piece of an over long word (a line of
+//     exactly `cols` characters with no space), which joins with nothing;
+//   - across a page boundary the format is ambiguous: paginate_spans puts no
+//     blank line at the top of a page, so a paragraph that ended on the last
+//     row looks like one that runs on. If the next page's first word would
+//     have fitted on the previous line, the wrap would have put it there, so
+//     that is a paragraph break; otherwise it is read as a continuation, which
+//     is right far more often than not (a paragraph end needs the last line
+//     to be nearly full as well as on the last row).
+// A word of exactly `cols` characters reads as a hard broken piece and joins
+// the next word without a space. Both misreadings are rare and cosmetic.
+class Rejoiner {
+ public:
+  using ParagraphSink = std::function<void(const std::string &para)>;
+
+  // `cols` is the column count of the grid the pages were made on.
+  Rejoiner(int cols, ParagraphSink sink);
+
+  // One text page. pageAnchor() is valid once this returns.
+  void page(const std::string &latin1);
+  // An image page (or anything else that ends a run of text): the paragraph
+  // in progress is complete.
+  void breakRun();
+  // End of the book.
+  void finish() { breakRun(); }
+
+  // Stream position of the first character of the last page fed, in the same
+  // stream Pipeline anchors count in, provided the paragraphs went into the
+  // pipeline unchanged.
+  uint32_t pageAnchor() const { return pageAnchor_; }
+  // Stream position after every paragraph flushed so far.
+  uint32_t streamPos() const { return paraBase_; }
+
+ private:
+  void flush();
+  bool hardBroken(const std::string &line) const;
+  bool continues(const std::string &prev, const std::string &next) const;
+
+  int cols_;
+  ParagraphSink sink_;
+  std::string para_;
+  std::string last_;  // last line added to para_
+  uint32_t paraBase_ = 0;
+  uint32_t pageAnchor_ = 0;
 };
 
 // Exposed for the host parity test.

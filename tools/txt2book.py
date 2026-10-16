@@ -14,9 +14,15 @@ text of the source PDF page they came from. The reviewer's veto is the review
 PNG: delete review/<id>.png and that figure is left out.
 
 With --dual the output is an MPG2 container holding the same book paginated
-twice: variant 0 on the 54x37 profont22 grid, variant 1 on the 40x27
-profont29 grid. Both grids come from pdf2book.GRIDS, the single source of
-truth for page geometry on the host side. Figure blobs are stored once and shared by both variants, and
+twice: variant 0 on the profont22 grid (54x37 on the default panel), variant 1
+on the profont29 grid (40x27). Both grids come from pdf2book.panel_grids, the
+single source of truth for page geometry on the host side.
+
+--panel {576,750} picks the screen the grids are computed for: 576 (default)
+is the 5.76 inch Good Display panel, 750 the Waveshare 7.5 inch V2 (37x32 and
+28x24). The grids are recorded in the file, and a reader on another panel
+re-paginates the book itself the first time it is opened. Figures keep the
+size the extractor gave them; the firmware scales an oversize one down. Figure blobs are stored once and shared by both variants, and
 every page carries an anchor into the text stream so the firmware can keep the
 reading position when the reader switches size.
 
@@ -125,8 +131,14 @@ def main(argv=None):
     parser.add_argument(
         "--dual", action="store_true",
         help="write an MPG2 book with two text sizes (profont22 54x37 and "
-             "profont29 40x27) instead of a single size MPG1 book")
+             "profont29 40x27 on the default panel) instead of a single size "
+             "MPG1 book")
+    parser.add_argument(
+        "--panel", type=int, choices=sorted(p.PANELS), default=p.DEFAULT_PANEL,
+        help="screen to paginate for: 576 (5.76 inch Good Display, default) "
+             "or 750 (Waveshare 7.5 inch V2)")
     args = parser.parse_args(argv)
+    grids = p.panel_grids(args.panel)
     strip_res = [re.compile(pat) for pat in args.strip_regex]
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -171,9 +183,11 @@ def main(argv=None):
     if args.dual:
         variants = []
         for font_id in (0, 1):
-            cols, rows = p.GRIDS[font_id]
+            cols, rows = grids[font_id]
             variants.append((font_id, pages_for_grid(items, cols, rows)))
-        size, header_len = p.write_mpg2(out_path, title, variants)
+        size, header_len = p.write_mpg2(
+            out_path, title, variants,
+            [grids[font_id] for font_id, _pages in variants])
 
         shared_image_bytes = 0
         seen = set()
@@ -186,9 +200,10 @@ def main(argv=None):
                         shared_image_bytes += len(blob)
 
         print("%s -> %s" % (args.txt, out_path))
-        print("    title: %s   format: MPG2, %d variants" % (title, len(variants)))
+        print("    title: %s   format: MPG2, %d variants   panel: %d"
+              % (title, len(variants), args.panel))
         for font_id, pages in variants:
-            cols, rows = p.GRIDS[font_id]
+            cols, rows = grids[font_id]
             text_bytes, _image_bytes, image_pages = payload_bytes(pages)
             print("    variant %d (font %d, %dx%d): %d pages "
                   "(%d text, %d image), text %s"
@@ -201,9 +216,10 @@ def main(argv=None):
         print("    file total: %s" % p.human(size))
         return 0
 
+    cols, rows = grids[0]
     pages = [payload for payload, _anchor in
-             pages_for_grid(items, p.COLS, p.ROWS)]
-    size = p.write_mpg1(out_path, title, pages)
+             pages_for_grid(items, cols, rows)]
+    size = p.write_mpg1(out_path, title, pages, (cols, rows))
 
     text_bytes = 0
     image_bytes = 0
@@ -217,6 +233,7 @@ def main(argv=None):
 
     print("%s -> %s" % (args.txt, out_path))
     print("    title: %s" % title)
+    print("    panel: %d (grid %dx%d)" % (args.panel, cols, rows))
     print("    pages: %d   size: %s" % (len(pages), p.human(size)))
     print("    breakdown: text %s in %d page(s), images %s in %d page(s), "
           "file total %s"

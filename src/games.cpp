@@ -906,8 +906,16 @@ void drawScreen() {
   lines.push_back("  password  " GAMES_AP_PASSWORD);
   lines.push_back("  http://" GAMES_AP_IP_TEXT "/");
   lines.push_back("");
-  lines.push_back("On that page: add books (.txt or .pgs),");
-  lines.push_back("delete books, and upload and play games.");
+  // 40 columns at most on panel 0 (54 there); a narrower grid (37 on the 7.5
+  // inch panel) gets the same words on three lines instead of clipping.
+  if (TEXT_COLS >= 40) {
+    lines.push_back("On that page: add books (.txt or .pgs),");
+    lines.push_back("delete books, and upload and play games.");
+  } else {
+    lines.push_back("On that page: add books (.txt or");
+    lines.push_back(".pgs), delete books, and upload and");
+    lines.push_back("play games.");
+  }
   lines.push_back("");
   lines.push_back(String((unsigned long)games::bookCount()) + " books, " +
                   String((unsigned long)games::romCount()) + " roms, " +

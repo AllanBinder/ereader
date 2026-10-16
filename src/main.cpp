@@ -12,6 +12,7 @@
 #include "input.h"
 #include "news_sync.h"
 #include "numbers_view.h"
+#include "panel.h"
 #include "pins.h"
 #include "rsvp.h"
 #include "ui.h"
@@ -29,7 +30,16 @@ const uint32_t AUTO_SYNC_GRACE_MS = 8000;
 // right now" flag. Keys are capped at 15 characters.
 const char *NVS_KEY_BOOT_SYNC = "bootsync";
 
-enum class AppState { READING, MENU, JUMP, EMPTY, NUMBERS, SPEED_PICK, SPEED_READ };
+enum class AppState {
+  READING,
+  MENU,
+  JUMP,
+  EMPTY,
+  NUMBERS,
+  SPEED_PICK,
+  SPEED_READ,
+  SCREEN_PICK,
+};
 
 AppState state = AppState::EMPTY;
 
@@ -45,6 +55,9 @@ uint32_t jumpTarget = 1;
 
 // Cursor in the speed read book picker (one tile per library book).
 int speedCursor = 0;
+
+// Cursor in the "Screen" list (one tile per supported panel, then Back).
+int screenCursor = 0;
 
 // Daily numbers view. The data is loaded from /numbers.json every time the
 // view is opened (it is a few KB) and dropped when it is left. The screen
@@ -136,23 +149,28 @@ bool autoSyncSkipped = false;
 void showEmptyLibrary(const String &reason) {
   state = AppState::EMPTY;
   std::vector<String> lines;
+  // Lines stay within 37 columns, the narrowest text grid in the panel table
+  // (the 7.5 inch panel), so the screen reads the same on every panel.
   lines.push_back("No book to read.");
   lines.push_back("");
   if (reason.length()) {
     lines.push_back(reason);
     lines.push_back("");
   }
-  lines.push_back("To add one from a phone or a computer:");
+  lines.push_back("To add one from a phone or a");
+  lines.push_back("computer:");
   lines.push_back("");
   lines.push_back("  1. Press center for the menu.");
   lines.push_back("  2. Pick \"Books and games (WiFi)\".");
-  lines.push_back("  3. Open the address it shows and upload a");
-  lines.push_back("     .txt or .pgs book.");
+  lines.push_back("  3. Open the address it shows and");
+  lines.push_back("     upload a .txt or .pgs book.");
   lines.push_back("");
-  lines.push_back("WiFi setup in the same menu joins your network;");
-  lines.push_back("without one, join the reader's own WiFi.");
+  lines.push_back("WiFi setup in the same menu joins");
+  lines.push_back("your network; without one, join");
+  lines.push_back("the reader's own WiFi.");
   lines.push_back("");
-  lines.push_back("Or convert on a computer with tools/ and run");
+  lines.push_back("Or convert on a computer with");
+  lines.push_back("tools/ and run");
   lines.push_back("    pio run -e esp32s3 -t uploadfs");
   ui::renderMessage("muon reader", lines);
 }
@@ -168,6 +186,18 @@ uint8_t storedRotation() {
   return (r == 1 || r == 3) ? r : DISPLAY_ROTATION;
 }
 
+// Forgets the stored flip. Called whenever the panel choice changes: the new
+// glass may sit in its case either way up, so it starts as built and the
+// reader flips it from the menu if needed.
+void clearStoredRotation() {
+  Preferences p;
+  if (!p.begin(NVS_NS_UI, false)) return;
+  p.remove(NVS_KEY_UI_ROTATION);
+  p.end();
+}
+
+// DISPLAY_ROTATION comes from the active panel's row in src/panel.cpp (set by
+// ui::begin / ui::beginPanel), so read it here at call time, never cache it.
 void applyRotation(uint8_t r) {
   ui::setRotation(r);
   input::setTurned(ui::rotation() != DISPLAY_ROTATION);
@@ -214,9 +244,44 @@ void setPage(uint32_t page, bool forceFull = false) {
   renderCurrentPage(forceFull);
 }
 
+// A book whose stored grid does not match the active panel (made on another
+// panel, or by a converter run for another --panel) is re-paginated on the
+// device the first time it is opened, with a status screen on glass while it
+// runs. books::reformat() swaps the file in place and maps the saved reading
+// position, so the book is reopened afterwards to pick up the new page table.
+// If the reformat fails (storage full, unreadable text) the old book stays
+// open on the wrong grid: lines clip, but the reader is not locked out.
+// Every path that opens a book (boot, menu, speed read, library reload) goes
+// through openBook(), so this is the single place it runs.
+bool prepareBookForPanel(Book &b, const String &slug) {
+  if (!b.needsReformat()) return true;
+  String title = b.title().length() ? b.title() : slug;
+  b.close();
+  auto show = [&](uint32_t done, uint32_t total) {
+    std::vector<String> lines;
+    lines.push_back(title);
+    lines.push_back("");
+    if (total) {
+      lines.push_back("page " + String((unsigned long)done) + " of " +
+                      String((unsigned long)total));
+    }
+    ui::renderStatusScreen("Formatting for this screen", lines);
+  };
+  String err;
+  bool ok = books::reformat(slug, show, &err);
+  if (!ok) logf("reformat %s failed: %s\n", slug.c_str(), err.c_str());
+  library = books::list();
+  return b.open(slug);
+}
+
 bool openBook(const String &slug) {
   if (!book.open(slug)) {
     logf("book open failed: %s (%s)\n", slug.c_str(), book.errorText().c_str());
+    return false;
+  }
+  if (!prepareBookForPanel(book, slug)) {
+    logf("book reformat failed: %s\n", slug.c_str());
+    book.close();
     return false;
   }
   uint8_t variant = 0;
@@ -299,6 +364,7 @@ enum class MenuAction {
   AUTO_SYNC,
   JUMP,
   FLIP_SCREEN,
+  SCREEN,
   BUTTON_TEST,
 };
 
@@ -325,10 +391,14 @@ std::vector<MenuRow> menuRows() {
   // one. The tile renderer cuts anything too wide with "..".
   rows.push_back(MenuRow("Resume", book.isOpen() ? book.title() : String("no book"),
                          MenuAction::RESUME, -1));
-  rows.push_back(MenuRow("Speed read", String(rsvp::words()) + " word" +
-                             (rsvp::words() > 1 ? "s" : "") + ", " +
-                             String(rsvp::wpm()) + " wpm",
-                         MenuAction::SPEED_READ, -1));
+  // Speed read is only offered on glass it has been tuned on (the panel
+  // table's speedReadSupported); elsewhere the tile does not exist.
+  if (panel::speedReadSupported()) {
+    rows.push_back(MenuRow("Speed read", String(rsvp::words()) + " word" +
+                               (rsvp::words() > 1 ? "s" : "") + ", " +
+                               String(rsvp::wpm()) + " wpm",
+                           MenuAction::SPEED_READ, -1));
+  }
   for (size_t i = 0; i < library.size(); i++) {
     String pos = "p. " + String((unsigned long)(library[i].savedPage + 1)) +
                  "/" + String((unsigned long)library[i].pageCount);
@@ -380,6 +450,8 @@ std::vector<MenuRow> menuRows() {
   rows.push_back(MenuRow("Flip screen",
                          input::turned() ? "turned 180" : "as built",
                          MenuAction::FLIP_SCREEN, -1));
+  rows.push_back(MenuRow("Screen", panel::shortName(panel::active()),
+                         MenuAction::SCREEN, -1));
   rows.push_back(MenuRow("Button test", "pad diagnostics", MenuAction::BUTTON_TEST, -1));
   return rows;
 }
@@ -619,12 +691,19 @@ void runButtonTest() {
     std::vector<String> lines;
     lines.push_back("Button test");
     lines.push_back("");
-    lines.push_back("Press each direction once. Every line that goes");
-    lines.push_back("active is listed, so a press that pulls two pins");
-    lines.push_back("shows both names on the same history row.");
+    // Within 37 columns, so it fits the narrowest panel's text grid.
+    lines.push_back("Press each direction once. Every");
+    lines.push_back("line that goes active is listed, so");
+    lines.push_back("a press that pulls two pins shows");
+    lines.push_back("both names on the same history row.");
     lines.push_back("");
     String pins = "gpio";
     for (int i = 0; i < BTN_COUNT; i++) {
+      // Two lines: all five pairs do not fit 37 columns.
+      if (i == 3) {
+        lines.push_back(pins);
+        pins = "    ";
+      }
       pins += "  " + String(names[i]) + " " + String(gpios[i]);
     }
     lines.push_back(pins);
@@ -637,7 +716,8 @@ void runButtonTest() {
     }
     lines.push_back("");
     lines.push_back("Leaves this screen after " + String((unsigned long)secsLeft) +
-                    "s with the pad untouched.");
+                    "s");
+    lines.push_back("with the pad untouched.");
     ui::renderStatusScreen("button test", lines);
   };
 
@@ -785,6 +865,12 @@ std::vector<ui::MenuTile> speedTiles() {
 }
 
 void openSpeedPicker() {
+  // No speed read on this panel: the menu tile is hidden, so this is only a
+  // guard against any other way in.
+  if (!panel::speedReadSupported()) {
+    openMenu();
+    return;
+  }
   if (library.empty()) {
     showEmptyLibrary("");
     return;
@@ -843,6 +929,80 @@ void handleSpeedPicker(Button b) {
     else rsvp::cycleWpm();
     ui::renderMenu("Speed read", speedTiles(), speedCursor);
   }
+}
+
+// ---------------------------------------------------------------- screen
+//
+// Menu tile "Screen" -> list of supported panels, drawn on the current one.
+// One tile per panel (short name, the one in use marked) and a Back tile,
+// because the pad has no back button and LEFT is a grid move. Picking the
+// panel in use or Back returns to the menu; picking another saves it and
+// reboots straight into it. If that glass then stays blank, the boot picker
+// (hold center through reset) gets the reader out.
+
+std::vector<ui::MenuTile> screenTiles() {
+  std::vector<ui::MenuTile> out;
+  for (uint8_t i = 0; i < panel::count(); i++) {
+    out.push_back(ui::MenuTile(panel::shortName(i),
+                               i == panel::active() ? "in use" : "restarts"));
+  }
+  out.push_back(ui::MenuTile("Back", "keep this screen"));
+  return out;
+}
+
+void openScreenPicker() {
+  state = AppState::SCREEN_PICK;
+  screenCursor = panel::active();
+  ui::renderMenu("Screen", screenTiles(), screenCursor);
+}
+
+void switchPanel(uint8_t id) {
+  std::vector<String> lines;
+  lines.push_back("Switching screen, restarting.");
+  lines.push_back("");
+  lines.push_back(panel::name(id));
+  lines.push_back("");
+  if (!panel::set(id)) {
+    logf("screen: could not save panel %u\n", (unsigned)id);
+    lines[0] = "Could not save the screen choice.";
+    lines.push_back("Nothing changed.");
+    ui::renderMessage("screen", lines);
+    waitForButtonOr(3000);
+    input::flush();
+    openMenu();
+    return;
+  }
+  clearStoredRotation();
+  logf("screen: panel %u (%s) saved, restarting\n", (unsigned)id,
+       panel::name(id));
+  lines.push_back("Connect that panel if it is not on");
+  lines.push_back("yet. If the screen stays blank,");
+  lines.push_back("hold center while pressing reset");
+  lines.push_back("to pick the screen again.");
+  ui::renderMessage("screen", lines);
+  // Let the message settle on glass (and the log line drain) before reset.
+  uint32_t start = millis();
+  while (millis() - start < 1500) {
+    esp_task_wdt_reset();
+    delay(BUTTON_POLL_MS);
+  }
+  ESP.restart();
+}
+
+void handleScreenPicker(Button b) {
+  const int count = (int)panel::count() + 1;  // + Back
+  if (screenCursor >= count) screenCursor = count - 1;
+  if (moveGridCursor(b, screenCursor, count)) {
+    ui::renderMenu("Screen", screenTiles(), screenCursor);
+    return;
+  }
+  if (b != BTN_CENTER) return;
+  if (screenCursor < (int)panel::count() &&
+      (uint8_t)screenCursor != panel::active()) {
+    switchPanel((uint8_t)screenCursor);
+    return;
+  }
+  openMenu();
 }
 
 void handleMenu(Button b) {
@@ -909,6 +1069,9 @@ void handleMenu(Button b) {
         case MenuAction::FLIP_SCREEN:
           flipScreen();
           ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor, true);
+          break;
+        case MenuAction::SCREEN:
+          openScreenPicker();
           break;
         case MenuAction::AUTO_SYNC:
           news_sync::setAutoSync(!news_sync::autoSyncEnabled());
@@ -1002,6 +1165,144 @@ void pumpJumpHold() {
   moveJump(jumpDeltaFor(held));
 }
 
+// ------------------------------------------------------- boot panel picker
+//
+// The way out of a blank screen (wrong panel chosen, or a 7.5 inch build on
+// its first boot): hold center while pressing reset or plugging in. The
+// reader then brings up each supported panel in turn and draws "Press center
+// if you can read this" on it; a center press while that text is readable
+// saves the panel and boot carries on with it, no reboot. Nothing pressed
+// for PICKER_ROUNDS passes over the list means the stored panel stays.
+//
+// This runs before input::begin(), which samples every pad's idle level and
+// would take a held center for idle. So the picker reads the raw CENTER pin
+// itself (no rotation, no pad turn) and judges "pressed" against the four
+// direction pins, which sit on the same module and share its polarity.
+
+const uint32_t PICKER_HOLD_MS = 300;     // center held this long at boot
+const uint32_t PICKER_WINDOW_MS = 8000;  // per panel, after its frame lands
+const uint32_t PICKER_PRESS_MS = 50;     // a press held this long counts
+const int PICKER_ROUNDS = 3;
+
+int pickerIdleLevel = HIGH;
+
+// The pad's idle level by majority of the direction pins. Some d-pad modules
+// short to GND (idle HIGH under our pullup), some to VCC (idle LOW); a tie
+// goes to HIGH, the pullup's own level.
+void pickerSamplePad() {
+  const int dirs[4] = {PIN_BTN_UP, PIN_BTN_DOWN, PIN_BTN_LEFT, PIN_BTN_RIGHT};
+  pinMode(PIN_BTN_CENTER, INPUT_PULLUP);
+  for (int i = 0; i < 4; i++) pinMode(dirs[i], INPUT_PULLUP);
+  delay(5);
+  int high = 0;
+  for (int i = 0; i < 4; i++) high += digitalRead(dirs[i]) == HIGH ? 1 : 0;
+  pickerIdleLevel = (high >= 2) ? HIGH : LOW;
+}
+
+bool pickerCenterDown() { return digitalRead(PIN_BTN_CENTER) != pickerIdleLevel; }
+
+// True when center reads down for the whole of `ms`, feeding the watchdog.
+bool pickerCenterHeldFor(uint32_t ms) {
+  uint32_t start = millis();
+  while (millis() - start < ms) {
+    esp_task_wdt_reset();
+    if (!pickerCenterDown()) return false;
+    delay(BUTTON_POLL_MS);
+  }
+  return true;
+}
+
+void pickerWaitRelease() {
+  while (pickerCenterDown()) {
+    esp_task_wdt_reset();
+    delay(BUTTON_POLL_MS);
+  }
+}
+
+// One picker frame on the live panel. Big type for the question, since the
+// point is to tell readable from garbled at a glance.
+void pickerDraw(uint8_t id, int round) {
+  const int x = TEXT_MARGIN_X;
+  const int w = SCREEN_W - 2 * TEXT_MARGIN_X;
+  ui::frameBegin(true);
+  do {
+    ui::gfx().fillScreen(ui::INK_WHITE);
+    ui::setInk(false);
+    ui::setFont(ui::Font::LABEL);
+    ui::printAt(x, 110, ui::fitText("Press center", w));
+    ui::printAt(x, 150, ui::fitText("if you can", w));
+    ui::printAt(x, 190, ui::fitText("read this", w));
+    ui::gfx().fillRect(x, 214, ui::TILE_ACCENT_W, 2, ui::INK_BLACK);
+    ui::setFont(ui::Font::STATUS_BOLD);
+    ui::printAt(x, 260, ui::fitText(panel::name(id), w));
+    ui::setFont(ui::Font::STATUS);
+    ui::printAt(x, 284,
+                ui::fitText("Screen " + String((unsigned)id + 1) + " of " +
+                                String((unsigned)panel::count()) + ", round " +
+                                String(round + 1) + " of " + String(PICKER_ROUNDS),
+                            w));
+    ui::printAt(x, 324, ui::fitText("Release center first if still held.", w));
+    ui::printAt(x, 344,
+                ui::fitText("The next screen type is tried in " +
+                                String((unsigned long)(PICKER_WINDOW_MS / 1000)) +
+                                " s.",
+                            w));
+    ui::drawStatusStrip("screen picker", "");
+  } while (ui::frameNext());
+  ui::frameEnd();
+}
+
+// Waits PICKER_WINDOW_MS for a fresh center press. A press only counts after
+// center has been seen up during this window, so the hold that started the
+// picker (or one carried over from the previous panel) never selects.
+bool pickerWaitForPress() {
+  bool armed = !pickerCenterDown();
+  uint32_t start = millis();
+  while (millis() - start < PICKER_WINDOW_MS) {
+    esp_task_wdt_reset();
+    if (!pickerCenterDown()) {
+      armed = true;
+    } else if (armed && pickerCenterHeldFor(PICKER_PRESS_MS)) {
+      return true;
+    }
+    delay(BUTTON_POLL_MS);
+  }
+  return false;
+}
+
+// Called from setup() right after ui::begin(), before input::begin().
+// Returns with the chosen (or stored) panel live and its geometry applied.
+void runBootPanelPicker() {
+  pickerSamplePad();
+  if (!pickerCenterDown() || !pickerCenterHeldFor(PICKER_HOLD_MS)) return;
+
+  const uint8_t stored = panel::active();
+  logf("screen picker: center held at boot, cycling %u panels\n",
+       (unsigned)panel::count());
+  for (int round = 0; round < PICKER_ROUNDS; round++) {
+    for (uint8_t id = 0; id < panel::count(); id++) {
+      ui::beginPanel(id);
+      if (panel::active() != id) continue;  // driver did not fit; skip it
+      logf("screen picker: trying panel %u (%s)\n", (unsigned)id,
+           panel::name(id));
+      pickerDraw(id, round);
+      if (!pickerWaitForPress()) continue;
+      if (panel::set(id)) {
+        if (id != stored) clearStoredRotation();
+        logf("screen picker: panel %u saved\n", (unsigned)id);
+      } else {
+        logf("screen picker: panel %u in use, NVS write failed\n", (unsigned)id);
+      }
+      // input::begin() samples idle levels next, so center must be up.
+      pickerWaitRelease();
+      return;
+    }
+  }
+  logf("screen picker: nothing picked, back to panel %u\n", (unsigned)stored);
+  ui::beginPanel(stored);
+  pickerWaitRelease();
+}
+
 }  // namespace
 
 void setup() {
@@ -1016,6 +1317,9 @@ void setup() {
   Serial.begin(115200);
 
   ui::begin();
+  // Hold center through reset to pick the panel (see runBootPanelPicker).
+  // Must stay ahead of input::begin().
+  runBootPanelPicker();
 
   if (!LittleFS.begin()) {
     logf("LittleFS mount failed\n");
@@ -1161,6 +1465,9 @@ void loop() {
         break;
       case AppState::SPEED_PICK:
         handleSpeedPicker(b);
+        break;
+      case AppState::SCREEN_PICK:
+        handleScreenPicker(b);
         break;
       case AppState::SPEED_READ:
         if (rsvp::handle(b)) {

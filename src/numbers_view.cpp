@@ -14,30 +14,53 @@ namespace {
 //
 // The grid starts lower than the menu's because a headline line sits between
 // the band and the first row; with 5 rows the tile is
-// (880 - 100 - 4*12) / 5 = 146 px tall. Width, gutter, pad and the band are
+// (GRID_BOTTOM - 100 - 4*12) / 5 tall: (880 - 148) / 5 = 146 px on panel 0,
+// (760 - 148) / 5 = 122 px on panel 1. Width, gutter, pad and the band are
 // the shared constants in ui.h. The mock these numbers were tuned on is
 // scratchpad numbers_mock.py / numbers_mock.png.
+//
+// Anything derived from SCREEN_W or ui::GRID_BOTTOM is a function, not a file
+// scope const: those are globals filled by panel::applyGeometry() at boot, so
+// a const copied from them at static init would freeze at panel 0's values.
 const int ROWS = 5;
 const int MAX_TILES = ui::GRID_COLS * ROWS;  // 10, the feed's own cap
 const int NAME_BASELINE_Y = 33;              // helvB24 in the 44 px band
 const int HEADLINE_BASELINE_Y = ui::HEADER_H + 36;  // 80
 const int GRID_TOP = ui::HEADER_H + 56;             // 100
-const int TILE_H =
-    (ui::GRID_BOTTOM - GRID_TOP - ui::GRID_GUTTER * (ROWS - 1)) / ROWS;  // 146
+int tileH() {
+  return (ui::GRID_BOTTOM - GRID_TOP - ui::GRID_GUTTER * (ROWS - 1)) / ROWS;
+}
 
-// Inside a tile, from its top edge.
-const int LABEL_BASELINE = 36;   // profont22
-const int ACCENT_Y = 50;         // 2 px hairline, clear of the label descenders
-const int VALUE_BASELINE = 104;  // fub42 digits are 42 px tall
-const int FOOT_BASELINE = 128;   // 7x14 avg and delta
+// Inside a tile, from its top edge. Two sets: the roomy one the mock was
+// tuned on, and a compact one for the shorter tiles of a smaller canvas.
+//   Roomy (tile >= 141, panel 0's 146 and 141): label 36 (descender to 40),
+//   2 px accent at 50, fub42 digits 62..104, 7x14 foot 128 (descender to
+//   ~131), so 10+ px clear above and below every element.
+//   Compact (panel 1's 122 and 117): label 32 (to 36), accent 42..44, digits
+//   50..92, foot 108 (cap top ~98, descender ~111), 6 px clear of the frame
+//   at the bottom of the 117 px ads tile.
+struct TileLayout {
+  int label;   // profont22 baseline
+  int accent;  // 2 px hairline, clear of the label descenders
+  int value;   // fub42 digits are 42 px tall
+  int foot;    // 7x14 avg and delta
+};
+const TileLayout ROOMY_TILE = {36, 50, 104, 128};
+const TileLayout COMPACT_TILE = {32, 42, 92, 108};
+const int ROOMY_TILE_MIN_H = 141;
+const TileLayout &tileLayout(int h) {
+  return h >= ROOMY_TILE_MIN_H ? ROOMY_TILE : COMPACT_TILE;
+}
 
 // Ads screen: the channel name sits on its own line between the headline and
-// the grid, so the grid starts lower and the tile loses a few pixels. The
-// tile content (deepest baseline 128) still clears it.
+// the grid, so the grid starts lower and the tile loses a few pixels:
+// (880 - 124 - 48) / 5 = 141 on panel 0 (roomy layout, deepest baseline 128),
+// (760 - 124 - 48) / 5 = 117 on panel 1 (compact layout, deepest 108).
 const int ADS_CHAN_BASELINE_Y = ui::HEADER_H + 72;  // 116, profont22
 const int ADS_GRID_TOP = ui::HEADER_H + 80;         // 124
-const int ADS_TILE_H =
-    (ui::GRID_BOTTOM - ADS_GRID_TOP - ui::GRID_GUTTER * (ROWS - 1)) / ROWS;  // 141
+int adsTileH() {
+  return (ui::GRID_BOTTOM - ADS_GRID_TOP - ui::GRID_GUTTER * (ROWS - 1)) / ROWS;
+}
 
 // Notes screen: one line per note in the body font, below the headline.
 const int NOTES_FIRST_BASELINE = GRID_TOP + 30;
@@ -46,10 +69,9 @@ const int NOTES_PITCH = 32;
 // Chart window. The plot sits between a value column on the left and the
 // right margin, with the date ticks under it. A dot is DOT px square.
 const int CHART_LEFT = TEXT_MARGIN_X + 92;      // room for "12,345,678"
-const int CHART_RIGHT = SCREEN_W - TEXT_MARGIN_X - 8;
+int chartRight() { return SCREEN_W - TEXT_MARGIN_X - 8; }  // 656 | 456
 const int CHART_TOP = GRID_TOP + 12;            // 112
-const int CHART_BOTTOM = ui::GRID_BOTTOM - 44;  // 836, ticks below
-const int TICK_BASELINE = CHART_BOTTOM + 30;
+int chartBottom() { return ui::GRID_BOTTOM - 44; }  // 836 | 716, ticks below
 const int DOT = 5;
 
 // A JSON body larger than this is not a numbers feed. The real one is a few
@@ -215,14 +237,15 @@ void drawValue(int x, int baselineY, const String &value, int maxW) {
 void drawTile(int x, int y, const numbers_view::Metric &m, int w, int h) {
   Adafruit_GFX &g = ui::gfx();
   g.drawRect(x, y, ui::TILE_W, h, ui::INK_BLACK);
+  const TileLayout &L = tileLayout(h);
   const int textW = ui::TILE_W - 2 * ui::TILE_PAD;
   const int left = x + ui::TILE_PAD;
 
   ui::setFont(ui::Font::BODY);
-  ui::printAt(left, y + LABEL_BASELINE, ui::fitText(m.label, textW));
-  g.fillRect(left, y + ACCENT_Y, ui::TILE_ACCENT_W, 2, ui::INK_BLACK);
+  ui::printAt(left, y + L.label, ui::fitText(m.label, textW));
+  g.fillRect(left, y + L.accent, ui::TILE_ACCENT_W, 2, ui::INK_BLACK);
 
-  drawValue(left, y + VALUE_BASELINE, m.value[w].length() ? m.value[w] : String("-"),
+  drawValue(left, y + L.value, m.value[w].length() ? m.value[w] : String("-"),
             textW);
 
   // Foot line left, delta right; the foot gives way to the delta when the
@@ -231,13 +254,13 @@ void drawTile(int x, int y, const numbers_view::Metric &m, int w, int h) {
   if (m.delta[w].length()) {
     ui::setFont(ui::Font::STATUS_BOLD);
     deltaW = ui::textWidth(m.delta[w]);
-    ui::printAt(x + ui::TILE_W - ui::TILE_PAD - deltaW, y + FOOT_BASELINE,
+    ui::printAt(x + ui::TILE_W - ui::TILE_PAD - deltaW, y + L.foot,
                 m.delta[w]);
   }
   if (m.foot[w].length()) {
     ui::setFont(ui::Font::STATUS);
     int room = textW - (deltaW ? deltaW + 12 : 0);
-    ui::printAt(left, y + FOOT_BASELINE, ui::fitText(m.foot[w], room));
+    ui::printAt(left, y + L.foot, ui::fitText(m.foot[w], room));
   }
 }
 
@@ -246,14 +269,15 @@ void drawProject(const numbers_view::Project &p, const String &right, int w) {
   ui::setFont(ui::Font::BODY);
   ui::printAt(TEXT_MARGIN_X, HEADLINE_BASELINE_Y,
               ui::fitText(p.headline[w], SCREEN_W - 2 * TEXT_MARGIN_X));
+  const int th = tileH();
   int n = (int)p.metrics.size();
   if (n > MAX_TILES) n = MAX_TILES;
   for (int i = 0; i < n; i++) {
     int r = i / ui::GRID_COLS;
     int c = i % ui::GRID_COLS;
     int x = TEXT_MARGIN_X + c * (ui::TILE_W + ui::GRID_GUTTER);
-    int y = GRID_TOP + r * (TILE_H + ui::GRID_GUTTER);
-    drawTile(x, y, p.metrics[i], w, TILE_H);
+    int y = GRID_TOP + r * (th + ui::GRID_GUTTER);
+    drawTile(x, y, p.metrics[i], w, th);
   }
 }
 
@@ -264,6 +288,7 @@ void drawAds(const numbers_view::Ads &ads, const String &right, int w) {
   ui::setFont(ui::Font::BODY);
   ui::printAt(TEXT_MARGIN_X, HEADLINE_BASELINE_Y,
               ui::fitText(ads.headline[w], SCREEN_W - 2 * TEXT_MARGIN_X));
+  const int th = adsTileH();
   int cols = (int)ads.channels.size();
   if (cols > ui::GRID_COLS) cols = ui::GRID_COLS;
   for (int c = 0; c < cols; c++) {
@@ -275,8 +300,8 @@ void drawAds(const numbers_view::Ads &ads, const String &right, int w) {
     int n = (int)ch.metrics.size();
     if (n > ROWS) n = ROWS;
     for (int i = 0; i < n; i++) {
-      int y = ADS_GRID_TOP + i * (ADS_TILE_H + ui::GRID_GUTTER);
-      drawTile(x, y, ch.metrics[i], w, ADS_TILE_H);
+      int y = ADS_GRID_TOP + i * (th + ui::GRID_GUTTER);
+      drawTile(x, y, ch.metrics[i], w, th);
     }
   }
 }
@@ -305,6 +330,9 @@ void drawNotes(const numbers_view::Data &d, const String &right) {
 void drawChart(const numbers_view::Data &d, const numbers_view::Metric &m) {
   Adafruit_GFX &g = ui::gfx();
   const int days = d.historyDays > 0 ? d.historyDays : 1;
+  const int CHART_RIGHT = chartRight();
+  const int CHART_BOTTOM = chartBottom();
+  const int TICK_BASELINE = CHART_BOTTOM + 30;
   const int plotW = CHART_RIGHT - CHART_LEFT;
   const int plotH = CHART_BOTTOM - CHART_TOP;
 
@@ -376,6 +404,33 @@ void drawChart(const numbers_view::Data &d, const numbers_view::Metric &m) {
     String msg = "No history for this metric yet.";
     int w = ui::textWidth(msg);
     ui::printAt(CHART_LEFT + (plotW - w) / 2, CHART_TOP + plotH / 2, msg);
+  }
+}
+
+// The status strip, fitted: the right hand hint plus the left text (with its
+// optional `extra` tail) must clear each other by 12 px. On panel 0 (648 px
+// between the margins) the long forms always fit, as before. On panel 1 (448
+// px, 436 after the gap) "daily numbers  1/5  chart 3/10" in 6x12 (168 px)
+// plus the long hint in 7x14 (40 chars, 280 px) is 448, so the short hint
+// takes over (35 chars, 245 px, 413 in all); only when even that collides
+// does the tail go, so nothing is ever drawn on top of anything.
+void drawFooter(const String &left, const String &extra, const String &hint,
+                const String &shortHint) {
+  const int room = SCREEN_W - 2 * TEXT_MARGIN_X - 12;
+  ui::setFont(ui::Font::SMALL);
+  const int wFull = ui::textWidth(left + extra);
+  const int wLeft = ui::textWidth(left);
+  ui::setFont(ui::Font::STATUS);
+  const int wHint = ui::textWidth(hint);
+  const int wShort = ui::textWidth(shortHint);
+  if (wFull + wHint <= room) {
+    ui::drawStatusStrip(left + extra, hint);
+  } else if (wFull + wShort <= room) {
+    ui::drawStatusStrip(left + extra, shortHint);
+  } else if (wLeft + wHint <= room) {
+    ui::drawStatusStrip(left, hint);
+  } else {
+    ui::drawStatusStrip(left, shortHint);
   }
 }
 
@@ -527,7 +582,8 @@ void render(const Data &data, int index, int window, bool forceFull) {
     if (data.windows[w].range.length()) right += "  " + data.windows[w].range;
   }
   String footerLeft = "daily numbers  " + String(index + 1) + "/" + String(total);
-  if (data.generated.length()) footerLeft += "  " + data.generated;
+  String footerExtra;
+  if (data.generated.length()) footerExtra = "  " + data.generated;
 
   ui::frameBegin(forceFull);
   do {
@@ -545,7 +601,9 @@ void render(const Data &data, int index, int window, bool forceFull) {
     ui::setInk(false);
     // The founder's "right" button is BTN_LEFT in the enum; the hint names
     // the button as held, not as wired.
-    ui::drawStatusStrip(footerLeft, "DOWN project   RIGHT window   CENTER menu");
+    drawFooter(footerLeft, footerExtra,
+               "DOWN project   RIGHT window   CENTER menu",
+               "DOWN proj  RIGHT win  CENTER menu");
   } while (ui::frameNext());
   ui::frameEnd();
 }
@@ -558,6 +616,7 @@ void renderChart(const Data &data, int index, int metric, bool forceFull) {
   String right = "Charts";
   if (data.historyDays > 0) right += "  last " + String(data.historyDays) + " days";
   String footerLeft = "daily numbers  " + String(index + 1) + "/" + String(total);
+  String footerExtra;
 
   // The screen's band title, and the metric the chart index lands on. A
   // project charts its own metrics; the ads screen charts its channels
@@ -571,7 +630,7 @@ void renderChart(const Data &data, int index, int metric, bool forceFull) {
   if (count > 0) {
     if (metric < 0) metric = 0;
     if (metric >= count) metric = count - 1;
-    footerLeft += "  chart " + String(metric + 1) + "/" + String(count);
+    footerExtra = "  chart " + String(metric + 1) + "/" + String(count);
   }
   if (onProject) {
     bandName = data.projects[index].name;
@@ -615,7 +674,9 @@ void renderChart(const Data &data, int index, int metric, bool forceFull) {
       drawEmpty(right);
     }
     ui::setInk(false);
-    ui::drawStatusStrip(footerLeft, "DOWN metric   RIGHT window   CENTER menu");
+    drawFooter(footerLeft, footerExtra,
+               "DOWN metric   RIGHT window   CENTER menu",
+               "DOWN metric  RIGHT win  CENTER menu");
   } while (ui::frameNext());
   ui::frameEnd();
 }

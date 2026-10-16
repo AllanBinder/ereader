@@ -40,10 +40,19 @@ struct VariantSpec {
   int rows;
 };
 
-const VariantSpec kVariants[NEWS_VARIANT_COUNT] = {
-    {BOOK_FONT_PROFONT22, TEXT_COLS, TEXT_ROWS},
-    {BOOK_FONT_PROFONT29, TEXT_LARGE_COLS, TEXT_LARGE_ROWS},
-};
+// Font of each variant, in the order the variants are written.
+const uint8_t kVariantFonts[NEWS_VARIANT_COUNT] = {BOOK_FONT_PROFONT22,
+                                                   BOOK_FONT_PROFONT29};
+
+// The grid of variant `v` on the active panel. Read at sync time, not copied
+// at static init: TEXT_COLS and friends are filled by panel::applyGeometry()
+// at boot, long after static initializers have run.
+VariantSpec variantSpec(uint8_t v) {
+  VariantSpec spec;
+  spec.fontId = kVariantFonts[v];
+  books::activeGrid(spec.fontId, spec.cols, spec.rows);
+  return spec;
+}
 
 void feedWdt() { esp_task_wdt_reset(); }
 
@@ -324,8 +333,10 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
   // Blobs are appended variant by variant in this order, and the offsets
   // written below walk the tables in the same order, so the two agree.
   std::vector<PageMeta> meta[NEWS_VARIANT_COUNT];
+  VariantSpec specs[NEWS_VARIANT_COUNT];
+  for (uint8_t v = 0; v < NEWS_VARIANT_COUNT; v++) specs[v] = variantSpec(v);
   for (uint8_t v = 0; v < NEWS_VARIANT_COUNT; v++) {
-    if (!paginateVariant(kVariants[v], textFile, blobs, meta[v], err)) {
+    if (!paginateVariant(specs[v], textFile, blobs, meta[v], err)) {
       blobs.close();
       LittleFS.remove(blobFile);
       return false;
@@ -335,12 +346,14 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
 
   // MPG2 header: magic, u8 variant_count, u16 title_len, title, then per
   // variant u8 font_id, u32 page_count and page_count entries of
-  // {u32 offset, u32 length, u32 anchor}.
+  // {u32 offset, u32 length, u32 anchor}, then the grid extension that
+  // records which panel's grids these are (see books.h).
   std::string titleUtf8(title.c_str());
   uint32_t headerLen = 4 + 1 + 2 + (uint32_t)titleUtf8.size();
   for (uint8_t v = 0; v < NEWS_VARIANT_COUNT; v++) {
     headerLen += 1 + 4 + 12 * (uint32_t)meta[v].size();
   }
+  headerLen += bookGridExtLen(NEWS_VARIANT_COUNT);
 
   fs::File out = LittleFS.open(bookPath(slug.c_str()).c_str(), "w");
   if (!out) {
@@ -365,7 +378,7 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
 
   uint32_t cursor = headerLen;
   for (uint8_t v = 0; v < NEWS_VARIANT_COUNT; v++) {
-    uint8_t fontId = kVariants[v].fontId;
+    uint8_t fontId = specs[v].fontId;
     out.write(&fontId, 1);
     putU32((uint32_t)meta[v].size());
     for (size_t i = 0; i < meta[v].size(); i++) {
@@ -375,6 +388,14 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
       cursor += meta[v][i].length;
     }
     feedWdt();
+  }
+  {
+    uint8_t grid[2 * NEWS_VARIANT_COUNT];
+    for (uint8_t v = 0; v < NEWS_VARIANT_COUNT; v++) {
+      grid[2 * v] = (uint8_t)specs[v].cols;
+      grid[2 * v + 1] = (uint8_t)specs[v].rows;
+    }
+    books::writeGridExt(out, NEWS_VARIANT_COUNT, grid);
   }
 
   uint8_t buf[512];

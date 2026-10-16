@@ -42,7 +42,8 @@
 //          "channels":[{"id":"asa","name":"Apple Search Ads",
 //                       "metrics":[{"l":"Spend","v":["$41.20",..],..}]},
 //                      {"id":"gads","name":"Google Ads","metrics":[..]}]}
-// Screen layout (680x920 portrait, constants in numbers_view.cpp):
+// Screen layout (portrait, 680x920 on panel 0 and 480x800 on the 7.5 inch
+// panel; constants and the per-panel arithmetic in numbers_view.cpp):
 //
 //   black header band: project name (helvB24, white), "7 days  4 Sep to 10 Sep"
 //   headline line (profont22), one per window
@@ -50,7 +51,8 @@
 //     value (fub42, or helvB24 when it carries a letter or does not fit,
 //     with a "$" prefix or a "k"/"M" suffix in helvB24 either side of it),
 //     the foot line bottom left and the delta bottom right (7x14)
-//   status strip: "daily numbers  2/5  08:07" and the button hint
+//   status strip: "daily numbers  2/5  08:07" and the button hint (a short
+//     hint, then no time, when the strip is too narrow for both)
 //
 // The ads screen adds a channel name line (profont22) between the headline
 // and the grid, which starts a little lower and has slightly shorter tiles.

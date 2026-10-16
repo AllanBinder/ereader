@@ -27,67 +27,98 @@ static const uint32_t WDT_TIMEOUT_MS = 8000;
 // ghosting on the T81 panel.
 static const uint16_t PARTIALS_BEFORE_FULL = 10;
 
-// Panel geometry. Good Display GDEH0576T81, 5.76 inch, 920x680 native, 1 bit,
-// on a DESPI-C02 adapter. The UI is PORTRAIT: the panel is rotated 90 degrees
-// so the logical canvas is 680 wide by 920 tall. Everything below is derived
-// from these two numbers.
-static const int SCREEN_W = 680;
-static const int SCREEN_H = 920;
+// Panel geometry. The panel is chosen at runtime (src/panel.*, NVS key "panel"
+// in NVS_NS_UI), so every size below that depends on it is a global filled by
+// panel::applyGeometry() before the first frame is drawn, not a constant. The
+// names are unchanged, so call sites read them exactly as before. Values are
+// written out for both panels:
+//   0  Good Display GDEH0576T81, 5.76 inch, 920x680 native, on a DESPI-C02
+//      adapter: portrait canvas 680 wide by 920 tall.
+//   1  Waveshare 7.5 inch V2, 800x480 native: portrait canvas 480 by 800.
+// The UI is PORTRAIT on every panel: the native frame is landscape and an odd
+// rotation turns it. Everything below is derived from the canvas width and
+// height. The initial values are panel 0's, so a file scope initializer that
+// copies one of these before setup() sees the 5.76 inch layout; code that
+// must follow the active panel reads the global at draw time instead.
+extern int SCREEN_W;  // 680 | 480
+extern int SCREEN_H;  // 920 | 800
 
-// Rotation passed to GxEPD2's setRotation(). The panel's native frame is
-// landscape (920x680), so an odd rotation is what makes the canvas portrait.
-//   1 = 90 degrees clockwise: FPC tail exits on the LEFT edge of the portrait
-//       page (native top edge becomes the left edge).
-//   3 = 270 degrees: FPC tail exits on the RIGHT edge, image flipped 180
-//       degrees relative to rotation 1.
-// Default 1. If the first portrait frame comes up upside down on the bench,
-// change this to 3 and reflash; nothing else in the firmware cares.
-static const uint8_t DISPLAY_ROTATION = 1;
+// Rotation passed to GxEPD2's setRotation(), copied from the active panel's
+// row in the table in src/panel.cpp. The panel's native frame is landscape,
+// so an odd rotation is what makes the canvas portrait.
+//   1 = 90 degrees clockwise: on the 5.76 inch panel the FPC tail exits on
+//       the LEFT edge of the portrait page (native top edge becomes the left).
+//   3 = 270 degrees: the opposite edge, image flipped 180 degrees relative to
+//       rotation 1.
+// Default 1 on every panel. If a panel's first portrait frame comes up upside
+// down on the bench, change its row in the table to 3 and reflash; nothing
+// else in the firmware cares.
+extern uint8_t DISPLAY_ROTATION;
 
 // "Flip screen" in the menu turns the picture 180 degrees at runtime (rotation
-// 1 <-> 3) for anyone running a prebuilt image who cannot edit the constant
-// above. The choice lives in NVS, so it survives reflashing and uploadfs.
-// Until it is used, DISPLAY_ROTATION is what the panel runs at. While the
-// picture is turned away from DISPLAY_ROTATION the pad is turned with it (UP
-// swaps with DOWN, LEFT with RIGHT), so "up" stays up for the reader.
+// 1 <-> 3) for anyone running a prebuilt image who cannot edit the table. The
+// choice lives in NVS, so it survives reflashing and uploadfs. Until it is
+// used, DISPLAY_ROTATION is what the panel runs at. While the picture is
+// turned away from DISPLAY_ROTATION the pad is turned with it (UP swaps with
+// DOWN, LEFT with RIGHT), so "up" stays up for the reader.
 #define NVS_NS_UI "ui"
 #define NVS_KEY_UI_ROTATION "rot"
+// Panel id (u8, see src/panel.h). Missing = 0, the GDEH0576T81.
+#define NVS_KEY_UI_PANEL "panel"
 
 // Status strip at the bottom of every screen. Same proportions as the earlier
-// landscape build: the rule sits 24 px above the bottom edge and the status
-// baseline 8 px above that edge, so 920 - 24 = 896 and 920 - 8 = 912.
-static const int STATUS_RULE_Y = SCREEN_H - 24;      // 896
-static const int STATUS_BASELINE_Y = SCREEN_H - 8;   // 912
+// landscape build: the rule sits STATUS_STRIP_H px above the bottom edge and
+// the status baseline STATUS_BASELINE_INSET px above that edge. On panel 0
+// that is 920 - 24 = 896 and 920 - 8 = 912; on panel 1, 776 and 792.
+static const int STATUS_STRIP_H = 24;
+static const int STATUS_BASELINE_INSET = 8;
+extern int STATUS_RULE_Y;      // SCREEN_H - STATUS_STRIP_H: 896 | 776
+extern int STATUS_BASELINE_Y;  // SCREEN_H - STATUS_BASELINE_INSET: 912 | 792
 
 // Content area: full width, everything above the status rule.
-static const int CONTENT_W = SCREEN_W;               // 680
-static const int CONTENT_H = STATUS_RULE_Y;          // 896
+extern int CONTENT_W;  // SCREEN_W: 680 | 480
+extern int CONTENT_H;  // STATUS_RULE_Y: 896 | 776
 
 // Text grid (shared pagination contract with the host converter). These must
 // match tools/pdf2book.py GRIDS exactly, or host pagination and on-glass
 // rendering disagree.
 //
-// Usable text width: 680 - 2*16 = 648 px.
+// The margin, first baseline, pitch, advance and descender are properties of
+// the font and stay constant; columns and rows are computed from the canvas
+// by panel::applyGeometry():
+//   cols = (SCREEN_W - 2*TEXT_MARGIN_X) / advance
+//   rows = (STATUS_RULE_Y - 1 - descent - firstBaseline) / pitch + 1
+// which is the most lines whose last descender ends at least one pixel above
+// the status rule.
 //
-// Font 0, u8g2_font_profont22_mf, 12 px advance. 648/12 = 54 columns exactly.
-// First baseline 26, pitch 24: baseline n is 26 + (n-1)*24, so the 37th is
-// 26 + 36*24 = 890 and its 4 px descender ends at 894, just clear of the
-// status rule at 896. A 38th would land at 914, past the rule.
-static const int TEXT_COLS = 54;
-static const int TEXT_ROWS = 37;
+// Font 0, u8g2_font_profont22_mf, 12 px advance, 4 px descender. Panel 0:
+// usable width 680 - 2*16 = 648 px, 648/12 = 54 columns exactly. First
+// baseline 26, pitch 24: baseline n is 26 + (n-1)*24, and (896 - 1 - 4 - 26)
+// / 24 = 36 (865/24), so 37 rows: the 37th baseline is 26 + 36*24 = 890 and
+// its descender ends at 894, just clear of the rule at 896. A 38th would land
+// at 914, past the rule. Panel 1: 448/12 = 37 columns, (776 - 1 - 4 - 26)/24
+// = 31 (745/24), so 32 rows.
+extern int TEXT_COLS;  // 54 | 37
+extern int TEXT_ROWS;  // 37 | 32
 static const int TEXT_MARGIN_X = 16;
 static const int TEXT_FIRST_BASELINE_Y = 26;
 static const int TEXT_LINE_PITCH = 24;
+static const int TEXT_ADVANCE = 12;
+static const int TEXT_DESCENT = 4;
 
-// Font 1, u8g2_font_profont29_mf, 16 px advance, so 648/16 = 40.5, floored to
-// 40 columns (8 px of unused width at the right edge). First baseline 32 keeps
-// the same ~8 px of ink margin at the top; pitch 32 puts baseline n at 32*n,
-// so the 27th is 864 and its 5 px descender ends at 869, clear of 896. A 28th
-// baseline would land at 896, on the rule itself.
-static const int TEXT_LARGE_COLS = 40;
-static const int TEXT_LARGE_ROWS = 27;
+// Font 1, u8g2_font_profont29_mf, 16 px advance, 5 px descender. Panel 0:
+// 648/16 = 40.5, floored to 40 columns (8 px of unused width at the right
+// edge). First baseline 32 keeps the same ~8 px of ink margin at the top;
+// pitch 32 puts baseline n at 32*n, and (896 - 1 - 5 - 32)/32 = 26 (858/32),
+// so 27 rows: the 27th is 864 and its descender ends at 869, clear of 896. A
+// 28th baseline would land at 896, on the rule itself. Panel 1: 448/16 = 28
+// columns, (776 - 1 - 5 - 32)/32 = 23 (738/32), so 24 rows.
+extern int TEXT_LARGE_COLS;  // 40 | 28
+extern int TEXT_LARGE_ROWS;  // 27 | 24
 static const int TEXT_LARGE_FIRST_BASELINE_Y = 32;
 static const int TEXT_LARGE_LINE_PITCH = 32;
+static const int TEXT_LARGE_ADVANCE = 16;
+static const int TEXT_LARGE_DESCENT = 5;
 
 // Font ids as stored in an MPG2 variant header.
 static const uint8_t BOOK_FONT_PROFONT22 = 0;
@@ -108,13 +139,17 @@ static const uint8_t MPG2_MAX_VARIANTS = 4;
 // first inside each byte, bit 1 = black.
 static const uint32_t MPG1_IMAGE_HEADER_LEN = 10;
 static const uint8_t MPG1_IMAGE_FLAG_DOUBLE = 0x01;  // draw each pixel as 2x2
-// A full page bitmap is the whole portrait content area, 680x896: the row
-// stride is ceil(680/8) = 85 bytes, so 85*896 = 76160 bytes. Anything larger
-// than this cannot be a page of ours, so reject it rather than allocate. The
-// converter emits half resolution figures with MPG1_IMAGE_FLAG_DOUBLE by
-// default (340x448, stride 43, 19264 bytes), so this ceiling only bites on
-// --full-res books. Rounded up a little for headroom.
-static const uint32_t MPG1_MAX_IMAGE_BYTES = 77000;
+// A full page bitmap is the whole portrait content area, 680x896 on panel 0:
+// the row stride is ceil(680/8) = 85 bytes, so 85*896 = 76160 bytes. Anything
+// larger than this cannot be a page of ours, so reject it rather than
+// allocate. The converter emits half resolution figures with
+// MPG1_IMAGE_FLAG_DOUBLE by default (340x448, stride 43, 19264 bytes), so this
+// ceiling only bites on --full-res books. A book made for one panel can be
+// read on another (an oversize page is scaled down to fit at draw time), so
+// the ceiling is the largest content bitmap of ANY panel in the table, not the
+// active one, rounded up to the next 1000 bytes for headroom: 77000 today
+// (panel 1's 60*776 = 46560 is smaller). Filled by panel::applyGeometry().
+extern uint32_t MPG1_MAX_IMAGE_BYTES;
 
 // Filesystem layout.
 #define BOOKS_DIR "/books"
@@ -366,6 +401,9 @@ static const uint32_t NET_TIME_SANE_EPOCH = 1735689600UL;
 // ceiling. A 60 ms cut is the most ghosting judged fine to ship; 100 ms ghosts
 // less at ~245 wpm. Normal reading keeps 10 MHz, the internal sensor and the
 // full waveform; only the mode switches.
+// All of this is tuned for panel 0. A panel whose row in src/panel.cpp says
+// speed read is unsupported never gets the fast drive (ui::setSpeedDrive and
+// ui::setSpeedCut do nothing there) and the menu should hide the mode.
 // Words per flash is a setting (1-3, picker tile, NVS); 2 is the default.
 // The cut is automatic: a flash is only cut when the time it stays on glass
 // (interval x dwell) is shorter than RSVP_UNCUT_MIN_MS, the full uncut flash

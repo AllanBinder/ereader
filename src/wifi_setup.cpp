@@ -10,6 +10,7 @@
 #include "config.h"
 #include "input.h"
 #include "net.h"
+#include "panel.h"
 #include "ui.h"
 #include "wifi_config.h"
 #include "wifi_store.h"
@@ -140,6 +141,8 @@ String portalPage() {
     }
     s += "</ul>";
   }
+  s += "<p class=\"known\">Screen: " + htmlEscape(panel::name(panel::active())) +
+       ". Change it from the reader's menu (Screen).</p>";
   s += "<p class=\"known\">Press the center button on the reader to "
        "finish.</p></body></html>";
   return s;
@@ -211,6 +214,31 @@ void handleNotFound() {
   server->send(302, "text/plain", "");
 }
 
+// Appends `text` to `lines` broken at spaces to the active panel's text grid
+// width (TEXT_COLS: 54 on the 5.76 inch panel, 37 on the 7.5 inch), so a
+// long status or a list of saved networks wraps instead of running off the
+// glass. A word longer than a line is cut hard.
+void pushWrapped(std::vector<String> &lines, const String &text,
+                 const String &indent = "") {
+  const int cols = TEXT_COLS > 8 ? TEXT_COLS : 8;
+  String rest = text;
+  bool first = true;
+  while (rest.length()) {
+    String lead = first ? String() : indent;
+    int room = cols - (int)lead.length();
+    if ((int)rest.length() <= room) {
+      lines.push_back(lead + rest);
+      break;
+    }
+    int cut = rest.lastIndexOf(' ', (unsigned int)room);
+    if (cut <= 0) cut = room;
+    lines.push_back(lead + rest.substring(0, cut));
+    rest = rest.substring(cut);
+    rest.trim();
+    first = false;
+  }
+}
+
 void drawScreen() {
   std::vector<String> lines;
   lines.push_back("WiFi setup");
@@ -229,12 +257,12 @@ void drawScreen() {
       saved += known[i].ssid;
     }
   }
-  lines.push_back(saved);
+  pushWrapped(lines, saved, "          ");
 
   String msg = statusText();
   if (msg.length()) {
     lines.push_back("");
-    lines.push_back(msg);
+    pushWrapped(lines, msg);
   }
   lines.push_back("");
   lines.push_back("Press center to exit.");

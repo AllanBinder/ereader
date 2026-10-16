@@ -17,8 +17,8 @@ photos lives at
 | Part | What to buy | Notes |
 |---|---|---|
 | Board | ESP32-S3 dev board with **8 MB or 16 MB** flash (N8R2, N16R8 and similar) | 4 MB boards are not supported by the ready-made image. USB-C. |
-| Panel | Good Display GDEH0576T81 (5.76 inch, 920x680, black and white) | Buy it as a kit with the adapter below. |
-| Panel adapter | Good Display DESPI-C02 | Set its RESE switch to 0.47. Runs at 3.3 V. |
+| Panel | Good Display GDEH0576T81 (5.76 inch, 920x680, black and white), or Waveshare 7.5 inch V2 (800x480, black and white) | Buy it as a kit with the adapter below. The image supports exactly these two panels. |
+| Panel adapter | Good Display DESPI-C02 (5.76 inch), or the Waveshare e-Paper driver HAT (7.5 inch) | DESPI: set its RESE switch to 0.47. Both run at 3.3 V. On HAT rev 2.3 or later tie its PWR pin to 3.3 V. Same pins either way. |
 | Buttons | Five-way navigation switch module (up, down, left, right, center) | Five signal legs plus one common leg. |
 | Capacitors | 470 uF electrolytic plus 100 nF ceramic | Across the adapter's VCC and GND. Not optional. |
 | Cable | USB-C data cable | For installing and for power. |
@@ -191,7 +191,7 @@ is to let [Claude Code](https://claude.com/claude-code) do it:
    with Claude Code.
 2. Describe what you want in plain words. For example:
    - "I wired the buttons to GPIO 4, 5, 6, 7 and 15, update the pins."
-   - "My panel is a Waveshare 7.5 inch V2, port the display code to it."
+   - "My panel is a different e-paper model, add it to the panel table."
    - "Add a menu item that shows my calendar from this URL."
    - "Pull a daily text file from my server into the library, like the news
      brief does."
@@ -288,7 +288,23 @@ still works), 19 and 20 are native USB, 33 through 37 are claimed by octal
 PSRAM on N16R8 style boards, and 43/44 are UART0. GPIO 11 is spare, and 15 is
 avoided because it is dead on the original unit.
 
-**Panel.** Good Display GDEH0576T81, 5.76 inch, 920x680, 1 bit, SSD2677
+**Supported panels and runtime selection.** One firmware image supports a
+small table of panels (`src/panel.h/.cpp`): id 0 is the Good Display
+GDEH0576T81 (5.76 inch, 920x680, DESPI-C02, custom fast driver) and id 1 is
+the Waveshare 7.5 inch V2 (800x480, UC8179, `GxEPD2_750_T7`). The choice is
+stored in NVS (namespace `ui`, key `panel`); a missing key means panel 0, so
+existing readers need no action. Use the **Screen** menu item to switch (it
+reboots). If the screen is blank (wrong panel, or a 7.5 inch build on first
+boot), hold the center button while pressing reset or plugging in: the reader
+cycles through the panels, drawing "Press center if you can read this" on each
+for about 8 seconds, and center saves the one you can read. Let go of center
+once the first picker screen appears; a press only counts after a release. Wiring is the same
+for both panels; on Waveshare HAT rev 2.3 or later tie the PWR pin to 3.3 V.
+Speed read is supported on the 5.76 inch panel only for now. Geometry (screen
+size, content area, text grids) is computed at boot for the active panel. A
+panel not in the table needs a code change: add an entry to the table.
+
+**Panel 0 detail.** Good Display GDEH0576T81, 5.76 inch, 920x680, 1 bit, SSD2677
 controller, driven through a DESPI-C02 adapter. **The reader runs the panel in
 portrait.** `ui::begin()` rotates it so the logical page is 680 wide by 920
 tall, which is what every layout number in `include/config.h` is written
@@ -564,8 +580,13 @@ pagination functions in `tools/pdf2book.py`.
 UTF-8 title, then u32 absolute file offsets for each page, then the page blobs
 back to back. A page blob is raw UTF-8 with its lines joined by `\n`; page p
 runs from `offsets[p]` to `offsets[p+1]`, or to end of file for the last page.
-Every line is at most 54 characters and every page at most 37 lines, so the
-firmware renders lines verbatim. Text is ASCII plus common Latin-1 punctuation
+Every line is at most the grid's column count and every page at most its row
+count (54 and 37 on the 5.76 inch panel), so the firmware renders lines
+verbatim. A book carries its grid (font id, cols, rows); old files with no grid
+info are taken as the 5.76 inch grids. If a book's grid does not match the
+active panel, the device re-paginates it from its own text the first time it is
+opened ("Formatting for this screen"), so books converted for one panel still
+open on another. Text is ASCII plus common Latin-1 punctuation
 only, since the profont22 font has no exotic glyphs.
 
 **`/books/<slug>.pgs`, MPG2.** The same book paginated on more than one text
@@ -573,7 +594,10 @@ grid, which is what "Text size" switches between. Magic `MPG2`, then u8 variant
 count, u16 title length and the title, then per variant a u8 font id, a u32
 page count and a page table of `{u32 offset, u32 length, u32 anchor}` entries,
 then the blob region. Anchors map a reading position from one text size to the
-other. `tools/txt2book.py --dual` writes this, and so does a news sync. The
+other. `tools/txt2book.py --dual` writes this, and so does a news sync.
+Both `tools/pdf2book.py` and `tools/txt2book.py` take `--panel 576` or
+`--panel 750` to paginate for a specific panel; the default is 576 (the
+5.76 inch panel). The
 full field by field description is in SPEC.md.
 
 **`/books/<slug>.pos`.** A u32 little-endian page index (0 based), rewritten on

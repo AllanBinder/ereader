@@ -13,6 +13,11 @@ in range, no line exceeds the variant's column count, no page exceeds its row
 count. For MPG2 it also verifies that anchors are non-decreasing within each
 variant and that every image blob is stored once and shared by all variants.
 
+The text grid of each variant comes from the file's grid extension when it
+has one (written by the converters since multi panel support), otherwise it is
+the default panel's grid for the variant's font, which is what the firmware
+assumes too. The summary says which, and which panel the grid belongs to.
+
 Image pages (blobs starting with 0x01 'I' 'M' 'G') are reported by dimensions,
 flags, and payload size instead of being decoded as text. Dumping a single
 image page prints a coarse ASCII preview.
@@ -26,7 +31,8 @@ import sys
 # tools/pdf2book.py is the single source of truth for page geometry on the
 # host side, and include/config.h is its twin on the device.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pdf2book import GRIDS, COLS, ROWS  # noqa: E402
+from pdf2book import (GRIDS, COLS, ROWS, GRID_EXT_MAGIC, PANELS,  # noqa: E402
+                      grid_ext_len, panel_grids)
 
 IMAGE_MAGIC = b"\x01IMG"
 IMAGE_HEADER_LEN = 10
@@ -38,13 +44,21 @@ class Variant(object):
     def __init__(self, font_id, spans):
         self.font_id = font_id
         self.spans = spans  # list of (offset, length, anchor)
+        self.recorded = None  # (cols, rows) from the grid extension, if any
 
     @property
     def page_count(self):
         return len(self.spans)
 
     def grid(self):
+        if self.recorded is not None:
+            return self.recorded
         return GRIDS.get(self.font_id, (COLS, ROWS))
+
+    def panels(self):
+        """Panels whose grid for this variant's font is this variant's grid."""
+        return [panel for panel in sorted(PANELS)
+                if panel_grids(panel).get(self.font_id) == self.grid()]
 
     def blob(self, data, index):
         offset, length, _anchor = self.spans[index]
@@ -58,6 +72,31 @@ class BookFile(object):
         self.header_len = header_len
         self.data = data
         self.variants = variants
+        self.grid_ext = read_grid_ext(data, header_len, variants)
+        if self.grid_ext:
+            self.header_len += grid_ext_len(len(variants))
+
+
+def read_grid_ext(data, pos, variants):
+    """Read the optional grid extension that sits between the page tables (ending
+    at `pos`) and the first blob. Sets each variant's `recorded` grid. Returns
+    True if the extension is present. Same rules as Book::readGridExt in
+    src/books.cpp: it only counts if every page starts after it."""
+    need = grid_ext_len(len(variants))
+    first_blob = min((span[0] for v in variants for span in v.spans),
+                     default=len(data))
+    if first_blob < pos + need or pos + need > len(data):
+        return False
+    if data[pos:pos + 4] != GRID_EXT_MAGIC or data[pos + 4] != len(variants):
+        return False
+    for index, variant in enumerate(variants):
+        cols = data[pos + 5 + 2 * index]
+        rows = data[pos + 6 + 2 * index]
+        if cols == 0 or rows == 0:
+            return False
+    for index, variant in enumerate(variants):
+        variant.recorded = (data[pos + 5 + 2 * index], data[pos + 6 + 2 * index])
+    return True
 
 
 def load(path):
@@ -188,8 +227,9 @@ def map_page(book, from_variant, index, to_variant):
 def dump_page(book, variant, number):
     blob = variant.blob(book.data, number - 1)
     info = page_image(blob)
-    header = "--- %s   page %d/%d   variant font %d ---" % (
-        book.title, number, variant.page_count, variant.font_id)
+    header = "--- %s   page %d/%d   variant font %d, grid %dx%d ---" % (
+        (book.title, number, variant.page_count, variant.font_id)
+        + variant.grid())
     if info is not None:
         print(header)
         print(image_summary(info))
@@ -253,9 +293,12 @@ def check_variant(book, variant, label, problems):
         if lines and lines[0] == "":
             problems.append("%s page %d starts with a blank line" % (label, i + 1))
 
-    print("%s: font %d, grid %dx%d, %d pages (%d text, %d image)"
-          % (label, variant.font_id, cols, rows, variant.page_count,
-             variant.page_count - image_pages, image_pages))
+    panels = variant.panels()
+    print("%s: font %d, grid %dx%d (%s, panel %s), %d pages (%d text, %d image)"
+          % (label, variant.font_id, cols, rows,
+             "recorded" if variant.recorded is not None else "assumed",
+             "/".join(str(x) for x in panels) if panels else "none",
+             variant.page_count, variant.page_count - image_pages, image_pages))
     print("    text bytes %d   image bytes %d   longest line %d/%d   tallest page %d/%d"
           % (text_bytes, image_bytes, max_line, cols, max_lines, rows))
     return image_offsets
@@ -328,6 +371,8 @@ def main(argv):
     print("title:       %s" % book.title)
     print("variants:    %d" % len(book.variants))
     print("header_len:  %d bytes" % book.header_len)
+    print("grid ext:    %s" % ("yes" if book.grid_ext
+                               else "no (default panel grids assumed)"))
     print("file size:   %d bytes" % len(book.data))
     print("")
 

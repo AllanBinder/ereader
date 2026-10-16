@@ -9,6 +9,7 @@
 #include "Gelasio40pt7b.h"
 #include "Gelasio48pt7b.h"
 #include "config.h"
+#include "panel.h"
 #include "ui.h"
 
 namespace {
@@ -24,7 +25,13 @@ void logf(const char *fmt, ...) {
 
 // ------------------------------------------------------------------ layout
 //
-// Landscape 920x680. Two hairline rules across the width frame the band the
+// Landscape, the panel's native frame: 920x680 on the 5.76 inch panel, the
+// only one speed read is enabled on (panel::speedReadSupported). The words
+// band is centred on the height and the footer is anchored to the bottom
+// edge, but the header, band and footer together need the full 680 px: on
+// a 480 px tall landscape frame (the 7.5 inch panel) the footer readouts
+// would land on the band, so a new panel needs its own pass here before its
+// row in src/panel.cpp turns speed read on. Two hairline rules across the width frame the band the
 // words flash in, and a status line sits at the bottom. Every chunk starts at
 // the same left edge (WORDS_LEFT), so the eye returns to one spot each flash
 // and only the chunk's right edge moves. (Anchoring each chunk on its first
@@ -400,20 +407,41 @@ void printTracked(int x, int baseY, const String &s, int track = TRACK) {
   }
 }
 
-// Label over a big readout with a small unit after it.
-void readout(int x, const String &label, const String &value, const String &unit) {
+// Label over a big readout with a small unit after it. `labelY` and
+// `valueY` are baselines (478 and 530 on the 680 px tall frame).
+void readout(int x, int labelY, int valueY, const String &label,
+             const String &value, const String &unit) {
   ui::setFont(ui::Font::HUD);
-  printTracked(x, 478, label);
+  printTracked(x, labelY, label);
   ui::setFont(ui::Font::HUD_NUM);
-  ui::printAt(x, 530, value);
+  ui::printAt(x, valueY, value);
   int vw = ui::textWidth(value);
   ui::setFont(ui::Font::HUD);
-  printTracked(x + vw + 8, 530, unit);
+  printTracked(x + vw + 8, valueY, unit);
 }
 
 String upper(String s) {
   s.toUpperCase();
   return s;
+}
+
+// The panel line in the header: the part number (the last word of the panel's
+// name in src/panel.cpp, skipping a trailing "800x480" style size) and the
+// native frame. "GDEH0576T81  //  920X680" on panel 0.
+String panelLabel() {
+  const panel::Spec &sp = panel::activeSpec();
+  String name = sp.name;
+  name.trim();
+  int cut = name.lastIndexOf(' ');
+  String part = cut >= 0 ? name.substring(cut + 1) : name;
+  String size = String(sp.nativeW) + "x" + String(sp.nativeH);
+  if (part.equalsIgnoreCase(size) && cut > 0) {
+    String rest = name.substring(0, cut);
+    rest.trim();
+    int cut2 = rest.lastIndexOf(' ');
+    part = cut2 >= 0 ? rest.substring(cut2 + 1) : rest;
+  }
+  return upper(part) + "  //  " + String(sp.nativeW) + "X" + String(sp.nativeH);
 }
 
 void drawHeader(Adafruit_GFX &g, int w) {
@@ -435,7 +463,7 @@ void drawHeader(Adafruit_GFX &g, int w) {
                 String(RSVP_CUT_MS) + "MS   /   SPI " +
                 String((unsigned long)(RSVP_SPI_HZ / 1000000)) + "MHZ";
   printTracked(HUD_L, 90, tele, 2);
-  String hw = "GDEH0576T81  //  920X680";
+  String hw = panelLabel();
   printTracked(R - trackedWidth(hw, 2), 90, hw, 2);
 }
 
@@ -465,7 +493,7 @@ void drawReticle(Adafruit_GFX &g, int w, int top, int bot, int fx) {
 // Minutes to the end of the book at the set rate. Words left come from the
 // page anchors (characters to go over measured characters per word); an MPG1
 // book has no anchors, so it falls back to pages to go at the average page.
-uint32_t minutesLeft() {
+double minutesLeftRaw() {
   const uint32_t pages = bk->pageCount();
   if (!pages || curPage >= pages) return 0;
   double wordsLeft;
@@ -479,22 +507,49 @@ uint32_t minutesLeft() {
   }
   if (shown.page == curPage) wordsLeft -= shown.word;
   if (wordsLeft < 0) wordsLeft = 0;
-  return (uint32_t)(wordsLeft / wpmValue * (calHeld / calNominal) + 0.5);
+  return wordsLeft / wpmValue * (calHeld / calNominal);
 }
 
-void drawFooter(Adafruit_GFX &g, int w) {
+// What the footer shows. The raw estimate wobbles a minute or so from flash to
+// flash (pacing and chars-per-word calibration update every flash and page),
+// so the readout moves in steps of 5 minutes (1 under 10 minutes) and only
+// once the estimate has drifted 3/4 of a step from what is on glass. A speed
+// or words-per-flash change shows the new figure straight away.
+int shownMins = -1;
+int shownForWpm = 0;
+int shownForWords = 0;
+
+uint32_t minutesLeft() {
+  const double raw = minutesLeftRaw();
+  const int step = raw < 10 ? 1 : 5;
+  const bool rateChanged = shownForWpm != wpmValue || shownForWords != wordsPerFlash;
+  if (shownMins < 0 || rateChanged || fabs(raw - shownMins) > 0.75 * step) {
+    shownMins = (int)(raw / step + 0.5) * step;
+    shownForWpm = wpmValue;
+    shownForWords = wordsPerFlash;
+  }
+  return (uint32_t)shownMins;
+}
+
+// Everything below is anchored to the bottom edge `h` (680 on panel 0: the
+// readout labels at h - 202 = 478, the bar at h - 112 = 568, the tag at
+// h - 40 = 640), and the readout columns sit at the same fractions of the
+// width as on the 920 px frame (330 and 620).
+void drawFooter(Adafruit_GFX &g, int w, int h) {
   const int R = w - RULE_INSET;
   const uint32_t pages = bk->pageCount();
   const uint32_t mins = minutesLeft();
   char left[16];
   snprintf(left, sizeof(left), "%lu:%02lu", (unsigned long)(mins / 60), (unsigned long)(mins % 60));
 
-  readout(HUD_L, "RATE", String(wpmValue), "WPM");
-  readout(330, "PAGE", String((unsigned long)(curPage + 1)), "/ " + String((unsigned long)pages));
-  readout(620, "REMAINING", left, "H");
+  const int labelY = h - 202, valueY = h - 150;
+  readout(HUD_L, labelY, valueY, "RATE", String(wpmValue), "WPM");
+  readout(w * 330 / 920, labelY, valueY, "PAGE",
+          String((unsigned long)(curPage + 1)), "/ " + String((unsigned long)pages));
+  readout(w * 620 / 920, labelY, valueY, "REMAINING", left, "H");
 
   // Segmented progress bar with quarter marks.
-  const int by = 568, bh = 14, bw = R - HUD_L;
+  const int by = h - 112, bh = 14, bw = R - HUD_L;
   g.drawRect(HUD_L, by, bw, bh, ui::INK_BLACK);
   int fillTo = HUD_L + 3 + (int)((uint64_t)(bw - 6) * (curPage + 1) / (pages ? pages : 1));
   for (int x = HUD_L + 3; x + 6 <= fillTo; x += 9) g.fillRect(x, by + 3, 6, bh - 6, ui::INK_BLACK);
@@ -506,7 +561,7 @@ void drawFooter(Adafruit_GFX &g, int w) {
 
   // Status tag, inverted, and the controls for this state.
   String tag = ended ? "END" : (playing ? "READING" : "PAUSED");
-  const int ty = 640, tw = trackedWidth(tag, TRACK) + 38;
+  const int ty = h - 40, tw = trackedWidth(tag, TRACK) + 38;
   g.fillRect(HUD_L, ty - 17, tw, 24, ui::INK_BLACK);
   ui::setInk(true);
   if (playing) {
@@ -533,7 +588,7 @@ void compose() {
   drawHeader(g, w);
   drawReticle(g, w, baseY - RULE_ABOVE, baseY + RULE_BELOW, WORDS_LEFT + FIX_IN);
   if (current.length()) drawWords(g, current, baseY);
-  drawFooter(g, w);
+  drawFooter(g, w, h);
 }
 
 void render(bool full) {
@@ -651,6 +706,7 @@ uint16_t resumeWord(const String &slug, uint8_t variant, uint32_t page) {
 void enter(Book &book, uint32_t page, uint16_t word) {
   bk = &book;
   clearCache();
+  shownMins = -1;
   curPage = page;
   playing = true;
   ended = false;

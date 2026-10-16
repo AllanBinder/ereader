@@ -8,11 +8,17 @@ Usage:
 Flags:
     --title "..."   override the book title (only valid with a single input)
     --out DIR       output directory (default data/books)
+    --panel {576,750}
+                    the screen the book is paginated for (default 576, the
+                    5.76 inch Good Display panel; 750 is the Waveshare 7.5
+                    inch V2). A book made for another panel still opens: the
+                    reader re-paginates it on the device the first time.
 
-The pagination contract lives in SPEC.md: 54 columns by 37 rows, monospace,
-on the portrait 680x920 canvas. Every line this script emits is at most 54
-characters and every page holds at most 37 lines, so the firmware can render
-lines verbatim with no wrapping.
+The pagination contract lives in SPEC.md: on the default panel 54 columns by
+37 rows, monospace, on the portrait 680x920 canvas (37x32 on the 480x800
+canvas of the 7.5 inch panel). Every line this script emits fits the grid, so
+the firmware can render lines verbatim with no wrapping. The grid is recorded
+in the file (see GRID_EXT_MAGIC), so the reader knows which screen it is for.
 
 Only text is extracted. Images are skipped inherently. A scanned PDF with no
 text layer produces an empty book; run OCR on it first.
@@ -64,6 +70,51 @@ GRIDS = {
 }
 
 COLS, ROWS = GRIDS[0]
+
+# Every panel the firmware supports, keyed by the --panel value, as the
+# portrait canvas (width, height). Mirrors the table in src/panel.cpp (native
+# frame turned on its side). GRIDS above is panel 576, which is also the grid
+# a book with no recorded grid is assumed to have.
+PANELS = {
+    576: (680, 920),   # panel 0, Good Display GDEH0576T81
+    750: (480, 800),   # panel 1, Waveshare 7.5 inch V2
+}
+DEFAULT_PANEL = 576
+
+# Font metrics behind the grids, by font id: (advance, first baseline, pitch,
+# descent). Twins of TEXT_* and TEXT_LARGE_* in include/config.h.
+FONT_METRICS = {
+    0: (12, 26, 24, 4),   # u8g2_font_profont22_mf
+    1: (16, 32, 32, 5),   # u8g2_font_profont29_mf
+}
+STATUS_STRIP_H = 24
+
+
+def panel_grids(panel):
+    """Text grids {font_id: (cols, rows)} for a panel, computed exactly the way
+    panel::applyGeometry() computes them on the device:
+        cols = (W - 2*MARGIN_X) // advance
+        rows = (ruleY - 1 - descent - firstBaseline) // pitch + 1
+    with ruleY = H - STATUS_STRIP_H. Panel 576 gives 54x37 and 40x27, panel
+    750 gives 37x32 and 28x24.
+    """
+    width, height = PANELS[panel]
+    rule_y = height - STATUS_STRIP_H
+    grids = {}
+    for font_id, (advance, first, pitch, descent) in FONT_METRICS.items():
+        cols = (width - 2 * MARGIN_X) // advance
+        rows = (rule_y - 1 - descent - first) // pitch + 1
+        grids[font_id] = (cols, rows)
+    return grids
+
+
+def panel_content(panel):
+    """Content area (width, height) above the status rule for a panel."""
+    width, height = PANELS[panel]
+    return width, height - STATUS_STRIP_H
+
+
+assert panel_grids(DEFAULT_PANEL) == GRIDS
 
 # Figure page targets. A full res figure fills the content area outright; the
 # default reduced pass stores far fewer pixels and sets MPG1_IMAGE_FLAG_DOUBLE
@@ -464,7 +515,8 @@ def build_image_blob(width, height, flags, raster):
     drawn_h = height * (2 if flags & IMAGE_FLAG_DOUBLE else 1)
     if drawn_w > CONTENT_W or drawn_h > CONTENT_H:
         sys.stderr.write("warning: figure draws at %dx%d, larger than the "
-                         "%dx%d content area; it will be cropped on device\n"
+                         "%dx%d content area; it will be scaled down on "
+                         "device\n"
                          % (drawn_w, drawn_h, CONTENT_W, CONTENT_H))
     if len(raster) != stride * height:
         raise ValueError("raster size %d does not match %dx%d" % (len(raster), width, height))
@@ -537,17 +589,46 @@ def slugify(name):
     return slug[:SLUG_MAX].strip("_") or "book"
 
 
-def write_mpg1(path, title, pages):
+# Grid extension. Optional, and placed in the gap between the page table(s)
+# and the first page blob, which no reader looks at: both MPG1 and MPG2 address
+# pages by absolute offset, so firmware that predates the extension skips it.
+#     4 bytes 'GRID', u8 variant_count (equal to the header's: 1 for MPG1),
+#     then per variant, in header order, u8 cols and u8 rows.
+# A book without it is read as the panel 576 grids (GRIDS). The firmware twin
+# is in src/books.h (GRID_EXT_MAGIC).
+GRID_EXT_MAGIC = b"GRID"
+
+
+def grid_ext_len(variant_count):
+    return 4 + 1 + 2 * variant_count
+
+
+def grid_ext_bytes(grids):
+    """Pack the grid extension for a list of (cols, rows), one per variant."""
+    out = bytearray(GRID_EXT_MAGIC)
+    out += struct.pack("<B", len(grids))
+    for cols, rows in grids:
+        if not (0 < cols < 256 and 0 < rows < 256):
+            raise ValueError("grid %dx%d does not fit the extension" % (cols, rows))
+        out += struct.pack("<BB", cols, rows)
+    return bytes(out)
+
+
+def write_mpg1(path, title, pages, grid=None):
     """Write the MPG1 container described in SPEC.md. Returns the byte count.
 
     Each entry of `pages` is either a list of text lines (a text page, joined
     with newlines) or a bytes object (a prebuilt page blob, written verbatim).
-    Image pages are built by build_image_blob() and passed as bytes.
+    Image pages are built by build_image_blob() and passed as bytes. `grid` is
+    the (cols, rows) the text was paginated on, recorded in the grid extension
+    (default: the panel 576 normal grid).
     """
     blobs = [bytes(page) if isinstance(page, (bytes, bytearray))
              else "\n".join(page).encode("utf-8") for page in pages]
     title_bytes = title.encode("utf-8")
-    header_len = 4 + 4 + 2 + len(title_bytes) + 4 * len(blobs)
+    ext = grid_ext_bytes([grid or GRIDS[0]])
+    table_end = 4 + 4 + 2 + len(title_bytes) + 4 * len(blobs)
+    header_len = table_end + len(ext)
 
     offsets = []
     cursor = header_len
@@ -562,6 +643,8 @@ def write_mpg1(path, title, pages):
     out += title_bytes
     for off in offsets:
         out += struct.pack("<I", off)
+    assert len(out) == table_end
+    out += ext
     assert len(out) == header_len
     for blob in blobs:
         out += blob
@@ -578,23 +661,32 @@ def blob_bytes(payload):
     return "\n".join(payload).encode("utf-8")
 
 
-def write_mpg2(path, title, variants):
+def write_mpg2(path, title, variants, grids=None):
     """Write the MPG2 multi variant container. Returns (size, header_len).
 
     `variants` is a list of (font_id, pages) where pages is a list of
-    (payload, anchor) pairs. Identical blobs are stored once and every table
+    (payload, anchor) pairs. `grids` is the (cols, rows) of each variant, in
+    the same order, for the grid extension (default: the panel 576 grid of
+    each variant's font). Identical blobs are stored once and every table
     entry that needs them points at the same offset, which is how both variants
     share a single copy of each figure. Because blobs are shared, a page's
     length cannot be derived from the next offset, so the table carries it.
 
     Layout: magic 'MPG2', u8 variant_count, u16 title_len, title, then per
     variant u8 font_id, u32 page_count, page_count entries of
-    {u32 offset, u32 length, u32 anchor}, then the blob region.
+    {u32 offset, u32 length, u32 anchor}, then the grid extension, then the
+    blob region.
     """
+    if grids is None:
+        grids = [GRIDS[font_id] for font_id, _pages in variants]
+    if len(grids) != len(variants):
+        raise ValueError("one grid per variant")
+    ext = grid_ext_bytes(grids)
     title_bytes = title.encode("utf-8")
-    header_len = 4 + 1 + 2 + len(title_bytes)
+    table_end = 4 + 1 + 2 + len(title_bytes)
     for _font_id, pages in variants:
-        header_len += 1 + 4 + 12 * len(pages)
+        table_end += 1 + 4 + 12 * len(pages)
+    header_len = table_end + len(ext)
 
     blobs = []
     index_of = {}
@@ -627,6 +719,8 @@ def write_mpg2(path, title, variants):
         out += struct.pack("<I", len(table))
         for index, length, anchor in table:
             out += struct.pack("<III", offsets[index], length, anchor)
+    assert len(out) == table_end
+    out += ext
     assert len(out) == header_len
     for blob in blobs:
         out += blob
@@ -646,7 +740,8 @@ def human(n):
 
 # --------------------------------------------------------------------- main
 
-def convert(pdf_path, out_dir, extract, title_override=None):
+def convert(pdf_path, out_dir, extract, title_override=None,
+            panel=DEFAULT_PANEL):
     raw_pages, meta_title = extract(pdf_path)
     stem = os.path.splitext(os.path.basename(pdf_path))[0]
     title = title_override or meta_title or stem
@@ -662,11 +757,12 @@ def convert(pdf_path, out_dir, extract, title_override=None):
             "then python3 tools/txt2book.py book.txt\n" % pdf_path
         )
         return None
-    pages = paginate(paragraphs)
+    cols, rows = panel_grids(panel)[0]
+    pages = paginate(paragraphs, cols, rows)
 
     slug = slugify(stem)
     out_path = os.path.join(out_dir, slug + ".pgs")
-    size = write_mpg1(out_path, title, pages)
+    size = write_mpg1(out_path, title, pages, (cols, rows))
     return {
         "title": title,
         "slug": slug,
@@ -683,6 +779,10 @@ def main(argv=None):
     parser.add_argument("pdfs", nargs="*", help="PDF paths (default: every PDF in books_src/)")
     parser.add_argument("--title", default=None, help="override the book title")
     parser.add_argument("--out", default=None, help="output directory (default data/books)")
+    parser.add_argument(
+        "--panel", type=int, choices=sorted(PANELS), default=DEFAULT_PANEL,
+        help="screen to paginate for: 576 (5.76 inch Good Display, default) "
+             "or 750 (Waveshare 7.5 inch V2)")
     args = parser.parse_args(argv)
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -716,6 +816,8 @@ def main(argv=None):
 
     print("extraction backend: %s" % name)
     print("output directory:   %s" % out_dir)
+    print("panel:              %d (grid %dx%d)"
+          % ((args.panel,) + panel_grids(args.panel)[0]))
     print("")
 
     failures = 0
@@ -725,7 +827,7 @@ def main(argv=None):
             failures += 1
             continue
         try:
-            info = convert(pdf, out_dir, extract, args.title)
+            info = convert(pdf, out_dir, extract, args.title, args.panel)
         except Exception as exc:
             sys.stderr.write("failed on %s: %s\n" % (pdf, exc))
             failures += 1

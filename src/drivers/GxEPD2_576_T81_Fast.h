@@ -99,6 +99,12 @@ class GxEPD2_576_T81_Fast : public GxEPD2_EPD
     // 150 ms instead of 367 ms, at the price of a little more ghosting. Full
     // refreshes are never cut.
     void setCutMs(int ms) { _cut_ms = ms < 0 ? 0 : ms; }
+    // Frees the previous-frame shadow. There is deliberately no destructor
+    // doing this (GxEPD2_BW copies the driver by value, and a copy would free
+    // the same block twice); the owner calls it once before the driver goes
+    // away, which src/panel.cpp does when the reader switches panels. The
+    // next write would allocate a fresh shadow.
+    void releaseShadow() { free(_shadow); _shadow = nullptr; }
   private:
     void _writeBuffer_fill(uint8_t value);
     void _writeBuffer_1bpp(const uint8_t bitmap[], bool invert, bool mirror_y, bool pgm);

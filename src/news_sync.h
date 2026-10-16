@@ -78,7 +78,8 @@ void setAutoSync(bool on);
 // The paginator a BOOK feed runs through, for any plain text already on the
 // filesystem (the games server uses it for a .txt uploaded from the browser).
 // Reads UTF-8 `textFile` a chunk at a time, paginates it on every grid in
-// NEWS_VARIANT_COUNT order (normal, then large), and writes an MPG2 book to
+// NEWS_VARIANT_COUNT order (normal, then large) as the active panel has them
+// at call time, and writes an MPG2 book with the grid extension (books.h) to
 // BOOKS_DIR/<slug>.pgs, using `blobFile` as scratch. `pagesOut[v]` is the page
 // count of variant v. Leaves `textFile` alone and the reading position alone.
 // Needs roughly four times the text size free on the filesystem; checking

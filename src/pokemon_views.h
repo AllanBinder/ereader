@@ -2,7 +2,9 @@
 
 #include <Arduino.h>
 
-// The four Pokemon companion views on the reader's 680x920 portrait panel.
+// The four Pokemon companion views, laid out on a 680x920 portrait page (the
+// 5.76 inch panel's canvas) and scaled down to fit a smaller canvas by
+// gbgfx::setLayout().
 //
 // While a Game Boy game runs in the browser player the page mirrors the
 // emulator's work RAM to the reader (see src/games.cpp and src/pokemon_state.*)

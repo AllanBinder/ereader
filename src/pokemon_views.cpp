@@ -41,9 +41,18 @@ using pokemon::Mon;
 
 // ---------------------------------------------------------------- geometry
 
+// Every coordinate in this file is in the 680x920 design space of the layout
+// doc; gbgfx::setLayout() maps it onto the active canvas (identity on panel
+// 0, a 480/680 shrink to 480x649 on the 7.5 inch panel). Draw through gbgfx
+// (printGb, drawTile*, gbgfx::fillRect) rather than ui::gfx() so a coordinate
+// is never read as a panel pixel. The only panel space pieces are the two
+// black bands, which run the full canvas width, and the hint band, which is
+// pinned to the bottom of the canvas.
+const int DESIGN_W = 680;
+const int DESIGN_H = 920;
 const int TOP_BAR_H = 24;
-const int HINT_Y = 896;
-const int HINT_TEXT_Y = 900;
+const int HINT_Y = DESIGN_H - 24;   // 896
+const int HINT_TEXT_Y = HINT_Y + 4;  // 900
 const int BAR_TEXT_Y = 4;
 
 // ---------------------------------------------------------------- sections
@@ -401,23 +410,15 @@ void drawHpBar(int x, int y, int scale, int hp, int maxHp, bool partyCap) {
   // ROM's own checker for yellow (so nothing to do), sparse for red.
   int colour = hpColor(e);
   if (!e || colour == 1) return;
-  Adafruit_GFX &g = ui::gfx();
   int bx = x + 2 * step;
   int by = y + 3 * scale;
   int bh = 2 * scale;
   int bw = e * scale;
   if (colour == 0) {
-    g.fillRect(bx, by, bw, bh, ui::INK_BLACK);
+    gbgfx::fillRect(bx, by, bw, bh, ui::INK_BLACK);
     return;
   }
-  g.fillRect(bx, by, bw, bh, ui::INK_WHITE);
-  for (int py = by; py < by + bh; py++) {
-    for (int px = bx; px < bx + bw; px++) {
-      if (((px & 1) == 0) && ((py & 1) == 0)) {
-        g.drawPixel(px, py, ui::INK_BLACK);
-      }
-    }
-  }
+  gbgfx::fillSparse(bx, by, bw, bh);
 }
 
 // `123/123`, seven cells, the current value inverted when the bar is red.
@@ -456,16 +457,23 @@ String updateText() {
 }
 
 void drawTopBar(const char *viewName) {
-  ui::gfx().fillRect(0, 0, SCREEN_W, TOP_BAR_H, ui::INK_BLACK);
+  ui::gfx().fillRect(0, 0, SCREEN_W, gbgfx::mapY(TOP_BAR_H), ui::INK_BLACK);
   gbgfx::printGb(12, BAR_TEXT_Y, viewName, 2, true);
   gbgfx::printGb(172, BAR_TEXT_Y, ljust(pokemon::playerName(), 7), 2, true);
   gbgfx::printGb(292, BAR_TEXT_Y, playTimeText(), 2, true);
   gbgfx::printGb(476, BAR_TEXT_Y, updateText(), 2, true);
 }
 
+// The hint band sits at the bottom of the canvas, not of the scaled page: on
+// the 7.5 inch panel the page is 649 px tall on an 800 px canvas, and the
+// spare 151 px go between the page body and the band. On panel 0 the shift
+// is 920 - 920 = 0.
 void drawHint(const char *text) {
-  ui::gfx().fillRect(0, HINT_Y, SCREEN_W, SCREEN_H - HINT_Y, ui::INK_BLACK);
+  gbgfx::setOriginY(SCREEN_H - gbgfx::layoutHeight());
+  int top = gbgfx::mapY(HINT_Y);
+  ui::gfx().fillRect(0, top, SCREEN_W, SCREEN_H - top, ui::INK_BLACK);
   gbgfx::printGb(12, HINT_TEXT_Y, text, 2, true);
+  gbgfx::setOriginY(0);
 }
 
 // ------------------------------------------------------------- view: home
@@ -503,13 +511,12 @@ void drawTownMap() {
   int sx = 180 + 16 * cx + 24, sy = 32 + 16 * cy + 8;
 
   // A sparse 1 px box 4 px outside the sprite, then the game's cursor sprite.
-  Adafruit_GFX &g = ui::gfx();
   int bx = sx - 4, by = sy - 4;
   for (int i = 0; i < 40; i += 2) {
-    g.drawPixel(bx + i, by, ui::INK_BLACK);
-    g.drawPixel(bx + i, by + 39, ui::INK_BLACK);
-    g.drawPixel(bx, by + i, ui::INK_BLACK);
-    g.drawPixel(bx + 39, by + i, ui::INK_BLACK);
+    gbgfx::drawPixel(bx + i, by, ui::INK_BLACK);
+    gbgfx::drawPixel(bx + i, by + 39, ui::INK_BLACK);
+    gbgfx::drawPixel(bx, by + i, ui::INK_BLACK);
+    gbgfx::drawPixel(bx + 39, by + i, ui::INK_BLACK);
   }
   uint8_t cursor[4 * 16];
   if (pack::read(S_TOWN_CURSOR, 0, cursor, sizeof(cursor)) == sizeof(cursor)) {
@@ -903,7 +910,7 @@ void drawItemRow(int x, int y, const MapItem &it, int nameCells) {
   gbgfx::printGb(x, y, row, 2, false);
   if (it.taken) {
     int cells = 1 + nameCells + 1 + 5;
-    ui::gfx().fillRect(x + 16, y + 7, (cells - 1) * 16, 2, ui::INK_BLACK);
+    gbgfx::fillRect(x + 16, y + 7, (cells - 1) * 16, 2, ui::INK_BLACK);
   }
 }
 
@@ -1326,6 +1333,7 @@ void draw(int page, bool terrain) {
   lastView = v;
   if (full) lastFullMs = now;
 
+  gbgfx::setLayout(DESIGN_W, DESIGN_H);
   pack::statReset();
   uint32_t renderMs = 0, pageMs = 0;
   ui::frameBegin(full);

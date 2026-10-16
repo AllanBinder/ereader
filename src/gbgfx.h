@@ -12,8 +12,42 @@
 //
 // Drawing goes through ui::gfx(), so these calls belong inside a
 // ui::frameBegin() / frameNext() paging loop like any other view.
+//
+// Layout space. The companion views are laid out to a pixel contract on a
+// 680x920 page (docs/pokemon-aux-display-layout.md). Every coordinate and
+// size handed to this module is in that design space, and setLayout() maps it
+// onto the active canvas: scaled by the largest ratio that fits the design on
+// the canvas (never up), centred horizontally, top aligned. Each design pixel
+// covers [map(p), map(p + 1)) on the panel, so neighbouring tiles butt up
+// without gaps and the dither patterns are drawn on panel pixels, not design
+// pixels. On panel 0 (680x920) the ratio is 1 and the map is the identity, so
+// the output is the same pixels as before the layer existed. On the 7.5 inch
+// panel (480x800) the ratio is 480/680, about 0.71: the page is 480x649, a
+// scale 2 Gen 1 cell is about 11 px (2.3 mm at that panel's 124 dpi, against
+// 2.0 mm on panel 0), and strokes come out 1 or 2 px wide.
 
 namespace gbgfx {
+
+// Fits a designW x designH page onto the active canvas (SCREEN_W/SCREEN_H at
+// the time of the call). Call before drawing a frame.
+void setLayout(int designW, int designH);
+// Design x / y to a panel x / y.
+int mapX(int x);
+int mapY(int y);
+// Height in panel pixels of the scaled design page.
+int layoutHeight();
+// A design space rectangle in panel pixels. A rectangle at least one design
+// pixel across is never less than one panel pixel across, so hairlines
+// survive the shrink.
+void fillRect(int x, int y, int w, int h, uint16_t color);
+void drawPixel(int x, int y, uint16_t color);
+// A design rectangle painted white with one black dot per 2x2 panel pixels
+// (the GB's lightest shade), keyed off panel coordinates.
+void fillSparse(int x, int y, int w, int h);
+// Moves the design page's top edge to panel row `y` (0 after setLayout). The
+// companion views use it to pin their hint band to the bottom of a canvas
+// taller than the scaled page.
+void setOriginY(int y);
 
 // One 8x8 tile in GB planar 2 bpp: 16 bytes, two bytes per row, low bitplane
 // first. Drawn at `scale` (1 = 8x8 px, 2 = 16x16 px, and so on).

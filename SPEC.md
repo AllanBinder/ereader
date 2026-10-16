@@ -88,7 +88,18 @@ numbers live in `include/config.h` and `tools/pdf2book.py` `GRIDS` and must
 match exactly. Advance widths are the `max_char_width` byte of the u8g2 font
 headers (`U8g2_for_Adafruit_GFX/src/u8g2_fonts.c`).
 
-Both grids are portrait 680x920 with a 16px left/right margin, so 648px of
+Text grids are computed per panel from the portrait canvas size and the font
+advance and pitch, not tuned by hand. A grid is the triple (font id, cols,
+rows); a book carries its grid, and old books with no grid info are assumed to
+be the panel 0 grids below. When a book's grid does not match the active panel,
+the device re-paginates it from its own text on first open ("Formatting for
+this screen"). `tools/pdf2book.py` and `tools/txt2book.py` take `--panel {576,750}`
+(default 576; output unchanged apart from a 9 byte GRID extension). Panels: 0 = GDEH0576T81 (5.76 inch,
+680x920 portrait canvas), 1 = Waveshare 7.5 inch V2 (480x800 portrait canvas),
+chosen at runtime (NVS `ui`/`panel`, missing = 0). The contract below is the
+panel 0 grid and is unchanged.
+
+Both panel 0 grids are portrait 680x920 with a 16px left/right margin, so 648px of
 text width, and the status rule sits at y=896 (24px above the bottom edge) with
 the status baseline at y=912.
 

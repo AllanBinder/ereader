@@ -10,7 +10,19 @@
 
 namespace ui {
 
+// Brings up the panel stored in NVS (src/panel.h, missing = panel 0): reads
+// the choice, fills the geometry globals and creates its driver. Call once,
+// early in setup(), before WiFi or anything else that fragments the heap: the
+// frame buffer is one contiguous block of up to ~78 KB.
 void begin();
+
+// Tears down the live driver (frame buffer first) and brings up panel `id` in
+// its place, geometry included, without a reboot and without touching NVS.
+// The boot-time picker uses it to cycle through the panels; pair it with
+// panel::set() to keep a choice. Rotation goes back to the new panel's
+// DISPLAY_ROTATION. False when the driver could not be allocated, in which
+// case it falls back to panel 0.
+bool beginPanel(uint8_t id);
 
 // Panel rotation, 1 or 3 (both portrait, 180 degrees apart). begin() starts at
 // DISPLAY_ROTATION; main.cpp applies the stored "Flip screen" choice. The next
@@ -22,10 +34,14 @@ uint8_t rotation();
 // both back when it is done, so the rest of the app never sees either.
 //
 // setLandscape(true) maps the portrait rotation to the landscape one the same
-// way up (1 -> 0, 3 -> 2), giving a 920x680 canvas; false restores the
-// portrait rotation it came from. setSpeedDrive(true) runs SPI at RSVP_SPI_HZ
-// and forces the partial LUT temperature to RSVP_LUT_TEMP; false puts back
-// 10 MHz and the internal sensor. Follow either with a full refresh.
+// way up (1 -> 0, 3 -> 2), giving the native frame as the canvas (920x680 on
+// panel 0); false restores the portrait rotation it came from. That holds for
+// every panel in src/panel.cpp, whose native frames are all landscape.
+// setSpeedDrive(true) runs SPI at RSVP_SPI_HZ and forces the partial LUT
+// temperature to RSVP_LUT_TEMP; false puts back the panel's own SPI clock and
+// the internal sensor. Follow either with a full refresh. The LUT and cut
+// hooks exist only on panels with panel::speedReadSupported(); elsewhere
+// setSpeedDrive and setSpeedCut leave the panel alone.
 void setLandscape(bool on);
 void setSpeedDrive(bool on);
 // Waveform cut for the next speed read flashes, in ms (0 = full waveform).
@@ -36,15 +52,17 @@ void setSpeedCut(int ms);
 // Shared by the menu (renderMenu below) and the daily numbers view
 // (src/numbers_view.cpp), so the two read as one family: the same header
 // band, the same two column grid of hairline cards, the same gutter and pad.
-// A tile is (648 - 12) / 2 = 318 px wide; the row count and therefore the tile
-// height is each view's own.
+// A tile is (SCREEN_W - 2*16 - 12) / 2 wide: (648 - 12) / 2 = 318 px on panel
+// 0, 218 on panel 1. The row count and therefore the tile height is each
+// view's own. GRID_BOTTOM and TILE_W follow the active panel, so they are
+// globals filled by panel::applyGeometry(), not constants.
 static const int HEADER_H = 44;             // solid black band at the top
 static const int HEADER_BASELINE_Y = 29;    // baseline of 7x14 text in it
 static const int GRID_COLS = 2;
 static const int GRID_GUTTER = 12;
-static const int GRID_BOTTOM = STATUS_RULE_Y - 16;  // 880
-static const int TILE_W =
-    (SCREEN_W - 2 * TEXT_MARGIN_X - GRID_GUTTER * (GRID_COLS - 1)) / GRID_COLS;
+static const int GRID_BOTTOM_INSET = 16;    // grid ends this far above the rule
+extern int GRID_BOTTOM;  // STATUS_RULE_Y - GRID_BOTTOM_INSET: 880 | 760
+extern int TILE_W;       // 318 | 218
 static const int TILE_PAD = 14;             // inset of the tile content
 static const int TILE_ACCENT_W = 36;        // short 2 px hairline under a label
 
