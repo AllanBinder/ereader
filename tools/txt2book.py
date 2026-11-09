@@ -18,8 +18,9 @@ twice: variant 0 on the profont22 grid (54x37 on the default panel), variant 1
 on the profont29 grid (40x27). Both grids come from pdf2book.panel_grids, the
 single source of truth for page geometry on the host side.
 
---panel {576,750} picks the screen the grids are computed for: 576 (default)
-is the 5.76 inch Good Display panel, 750 the Waveshare 7.5 inch V2 (37x32 and
+--panel {576,579,750} picks the screen the grids are computed for: 576
+(default) is the 5.76 inch Good Display panel, 579 the 5.79 inch Good Display
+bar (63x10 and 47x7, landscape), 750 the Waveshare 7.5 inch V2 (37x32 and
 28x24). The grids are recorded in the file, and a reader on another panel
 re-paginates the book itself the first time it is opened. Figures keep the
 size the extractor gave them; the firmware scales an oversize one down. Figure blobs are stored once and shared by both variants, and
@@ -135,8 +136,8 @@ def main(argv=None):
              "MPG1 book")
     parser.add_argument(
         "--panel", type=int, choices=sorted(p.PANELS), default=p.DEFAULT_PANEL,
-        help="screen to paginate for: 576 (5.76 inch Good Display, default) "
-             "or 750 (Waveshare 7.5 inch V2)")
+        help="screen to paginate for: 576 (5.76 inch Good Display, default), "
+             "579 (5.79 inch Good Display bar) or 750 (Waveshare 7.5 inch V2)")
     args = parser.parse_args(argv)
     grids = p.panel_grids(args.panel)
     strip_res = [re.compile(pat) for pat in args.strip_regex]

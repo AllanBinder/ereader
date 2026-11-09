@@ -56,6 +56,11 @@
 //
 // The ads screen adds a channel name line (profont22) between the headline
 // and the grid, which starts a little lower and has slightly shorter tiles.
+//
+// On a short canvas (ui::SHORT_CANVAS, the 792x272 bar) the band is the thin
+// one, the grid is 5 x 2 instead of 2 x 5 with smaller cards (7x14 bold
+// label, helvB24 value), and the ads screen is a row per channel with the
+// channel names in a column at the left.
 
 namespace numbers_view {
 

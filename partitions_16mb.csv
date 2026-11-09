@@ -1,0 +1,12 @@
+# Partition table for the 16 MB ESP32-S3 N16R8 module of the wide reader
+# ([env:esp32s3_579]). Same layout as partitions.csv with the filesystem
+# extended to the end of flash, as that file describes: 0x1000000 - 0x210000 =
+# 0xDF0000, about 13.9 MB. The extra room is also what lets a book made for
+# the 5.76 inch panel be re-paginated for the 792x272 bar on the device
+# (books::reformat needs about twice the book's text free while it runs).
+#
+# Name,   Type, SubType, Offset,   Size,      Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  factory, 0x10000,  0x200000,
+spiffs,   data, spiffs,  0x210000, 0xDF0000,

@@ -99,6 +99,11 @@ class GxEPD2_576_T81_Fast : public GxEPD2_EPD
     // 150 ms instead of 367 ms, at the price of a little more ghosting. Full
     // refreshes are never cut.
     void setCutMs(int ms) { _cut_ms = ms < 0 ? 0 : ms; }
+    // Drive every pixel on the next partial writes, not just the changed
+    // ones: each pixel is sent as a transition from its inverse, so the
+    // partial LUT pushes white pixels white and black pixels black. Restores
+    // a static frame grayed by cut flashes without a full refresh's flash.
+    void setDriveAll(bool on) { _drive_all = on; }
     // Frees the previous-frame shadow. There is deliberately no destructor
     // doing this (GxEPD2_BW copies the driver by value, and a copy would free
     // the same block twice); the owner calls it once before the driver goes
@@ -122,6 +127,7 @@ class GxEPD2_576_T81_Fast : public GxEPD2_EPD
     bool _want_fast = false;
     int _forced_temp = -1;
     int _cut_ms = 0;
+    bool _drive_all = false;
     uint8_t* _shadow = nullptr;
     static const uint32_t _shadow_size = ((uint32_t(WIDTH) + 7) / 8) * uint32_t(HEIGHT);
 };

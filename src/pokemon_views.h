@@ -4,7 +4,8 @@
 
 // The four Pokemon companion views, laid out on a 680x920 portrait page (the
 // 5.76 inch panel's canvas) and scaled down to fit a smaller canvas by
-// gbgfx::setLayout().
+// gbgfx::setLayout(), or folded into two columns on a wide short one (the
+// 792x272 bar) by gbgfx::setFold().
 //
 // While a Game Boy game runs in the browser player the page mirrors the
 // emulator's work RAM to the reader (see src/games.cpp and src/pokemon_state.*)

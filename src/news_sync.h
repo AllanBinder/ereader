@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>
 
 #include <functional>
 
@@ -88,5 +89,12 @@ void setAutoSync(bool on);
 bool writeTextBook(const char *textFile, const char *blobFile,
                    const String &slug, const String &title,
                    uint32_t pagesOut[NEWS_VARIANT_COUNT], String *err);
+
+// The same writer on any filesystem: `textFile` and `blobFile` live on `fs`,
+// and the book goes to `outPath` there (its folder must exist). The microSD
+// card books (src/sd_card.cpp) are converted with this, card to card.
+bool writeTextBookOn(fs::FS &fs, const char *textFile, const char *blobFile,
+                     const String &outPath, const String &title,
+                     uint32_t pagesOut[NEWS_VARIANT_COUNT], String *err);
 
 }  // namespace news_sync

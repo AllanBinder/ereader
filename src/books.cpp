@@ -7,6 +7,7 @@
 #include <string>
 
 #include "config.h"
+#include "sd_card.h"
 #include "text_paginate.h"
 
 namespace {
@@ -56,11 +57,20 @@ uint32_t decodeU32(const uint8_t *b) {
          ((uint32_t)b[3] << 24);
 }
 
+// A card book (slug CARD_SLUG_PREFIX + name, see config.h) lives on the
+// microSD card in SD_CONVERTED_DIR, its reading position beside it; every
+// other book is BOOKS_DIR on LittleFS.
+fs::FS &fsOf(const String &slug) {
+  return books::isCardSlug(slug) ? sd_card::fs() : (fs::FS &)LittleFS;
+}
+
 String bookPath(const String &slug) {
+  if (books::isCardSlug(slug)) return sd_card::bookPath(slug);
   return String(BOOKS_DIR "/") + slug + ".pgs";
 }
 
 String posPath(const String &slug) {
+  if (books::isCardSlug(slug)) return sd_card::posPath(slug);
   return String(BOOKS_DIR "/") + slug + ".pos";
 }
 
@@ -79,7 +89,11 @@ bool Book::open(const String &slug) {
   close();
   slug_ = slug;
 
-  fs::File f = LittleFS.open(bookPath(slug).c_str(), "r");
+  if (books::isCardSlug(slug) && !sd_card::mounted()) {
+    error_ = "No card";
+    return false;
+  }
+  fs::File f = fsOf(slug).open(bookPath(slug).c_str(), "r");
   if (!f) {
     error_ = "Cannot open book file";
     return false;
@@ -377,7 +391,7 @@ bool Book::loadPage(uint32_t index, PageData &out) {
   uint32_t len = pages[index].length;
   if (len == 0 || start + len > fileSize_) return false;
 
-  fs::File f = LittleFS.open(bookPath(slug_).c_str(), "r");
+  fs::File f = fsOf(slug_).open(bookPath(slug_).c_str(), "r");
   if (!f) return false;
   if (!f.seek(start, SeekSet)) {
     f.close();
@@ -490,9 +504,83 @@ std::vector<BookEntry> list() {
   return out;
 }
 
+std::vector<BookEntry> listAll() {
+  std::vector<BookEntry> out = list();
+  std::vector<BookEntry> card = sd_card::list();
+  out.insert(out.end(), card.begin(), card.end());
+  return out;
+}
+
+bool isCardSlug(const String &slug) {
+  return slug.startsWith(CARD_SLUG_PREFIX);
+}
+
+// The host converters' slug rule (tools/pdf2book.py slugify): lowercase, every
+// run of characters outside [a-z0-9] becomes one '_', no '_' at either end,
+// cut to BOOK_SLUG_MAX. The feed slugs are taken, so a book called "news"
+// becomes "news_book" instead of being overwritten by the next sync.
+String slugify(const String &stem) {
+  String lower = stem;
+  lower.toLowerCase();
+  String out;
+  bool pendingSep = false;
+  for (size_t i = 0; i < lower.length(); i++) {
+    char c = lower[i];
+    bool keep = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    if (!keep) {
+      pendingSep = out.length() > 0;
+      continue;
+    }
+    if (pendingSep) out += '_';
+    pendingSep = false;
+    out += c;
+  }
+  if ((int)out.length() > BOOK_SLUG_MAX) out = out.substring(0, BOOK_SLUG_MAX);
+  while (out.endsWith("_")) out.remove(out.length() - 1);
+  if (!out.length()) out = "book";
+  if (out == NEWS_SLUG || out == METRICS_SLUG) out += "_book";
+  return out;
+}
+
+// A title for the library: control characters dropped, runs of spaces folded,
+// cut to BOOK_TITLE_MAX characters (UTF-8 aware, never splits a character).
+String cleanTitle(const String &raw) {
+  String out;
+  bool space = false;
+  int chars = 0;
+  for (size_t i = 0; i < raw.length(); i++) {
+    uint8_t c = (uint8_t)raw[i];
+    if (c < 0x20 || c == 0x7F || c == ' ') {
+      space = out.length() > 0;
+      continue;
+    }
+    bool lead = (c & 0xC0) != 0x80;
+    if (lead) {
+      if (chars >= BOOK_TITLE_MAX) break;
+      if (space) {
+        out += ' ';
+        chars++;
+      }
+      space = false;
+      chars++;
+    }
+    out += (char)c;
+  }
+  return out;
+}
+
+// Upload stem to a readable title: "alice_in_wonderland" -> "alice in wonderland".
+String titleFromStem(const String &stem) {
+  String t = stem;
+  t.replace('_', ' ');
+  t.replace('-', ' ');
+  return cleanTitle(t);
+}
+
 uint32_t loadPosition(const String &slug, uint8_t *variant) {
   if (variant) *variant = 0;
-  fs::File f = LittleFS.open(posPath(slug).c_str(), "r");
+  if (isCardSlug(slug) && !sd_card::mounted()) return 0;
+  fs::File f = fsOf(slug).open(posPath(slug).c_str(), "r");
   if (!f) return 0;
   uint8_t b[8];
   uint32_t page = 0;
@@ -512,7 +600,8 @@ uint32_t loadPosition(const String &slug, uint8_t *variant) {
 }
 
 void savePosition(const String &slug, uint32_t page, uint8_t variant) {
-  fs::File f = LittleFS.open(posPath(slug).c_str(), "w");
+  if (isCardSlug(slug) && !sd_card::mounted()) return;
+  fs::File f = fsOf(slug).open(posPath(slug).c_str(), "w");
   if (!f) return;
   uint8_t b[8] = {(uint8_t)(page & 0xFF), (uint8_t)((page >> 8) & 0xFF),
                   (uint8_t)((page >> 16) & 0xFF), (uint8_t)((page >> 24) & 0xFF),
@@ -678,6 +767,15 @@ namespace books {
 bool reformat(const String &slug, ReformatProgress progress, String *err) {
   String dummy;
   if (!err) err = &dummy;
+
+  // Card books are converted from their .txt at boot on the active panel's
+  // grids (src/sd_card.cpp), so one that does not fit was made before a
+  // panel switch that has not rebooted yet. Rewriting it here would need the
+  // LittleFS scratch files below; the next boot reconverts it instead.
+  if (isCardSlug(slug)) {
+    *err = "card book, restart to convert";
+    return false;
+  }
 
   Book src;
   if (!src.open(slug)) {

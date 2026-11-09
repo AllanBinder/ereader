@@ -253,7 +253,7 @@ class BodyReader {
 
 // Paginates the temp file on one grid, appending each finished page blob to
 // the already open blob file and its length and anchor to `meta`.
-bool paginateVariant(const VariantSpec &spec, const char *tmpFile,
+bool paginateVariant(fs::FS &fs, const VariantSpec &spec, const char *tmpFile,
                      fs::File &blobs, std::vector<PageMeta> &meta, String *err) {
   bool sinkFailed = false;
   textpage::Pipeline pipeline(
@@ -278,7 +278,7 @@ bool paginateVariant(const VariantSpec &spec, const char *tmpFile,
         feedWdt();
       });
 
-  fs::File src = LittleFS.open(tmpFile, "r");
+  fs::File src = fs.open(tmpFile, "r");
   if (!src) {
     *err = "temp missing";
     return false;
@@ -316,15 +316,17 @@ bool paginateVariant(const VariantSpec &spec, const char *tmpFile,
 // MPG2 book, so the "Text size" menu item works on it like on a host built
 // dual size book. Page blobs go to a second temp file first, because the MPG2
 // page tables sit ahead of the blob region and their size is only known once
-// every page of every variant exists. Public as news_sync::writeTextBook().
-bool writeTextBookImpl(const char *textFile, const char *blobFile,
-                       const String &slug, const String &title,
+// every page of every variant exists. Public as news_sync::writeTextBook()
+// (LittleFS, BOOKS_DIR/<slug>.pgs) and writeTextBookOn() (any filesystem and
+// path: the microSD card books, src/sd_card.cpp).
+bool writeTextBookImpl(fs::FS &fs, const char *textFile, const char *blobFile,
+                       const String &outPath, const String &title,
                        uint32_t *pagesOut, String *err) {
   // A filesystem that has never had books uploaded to it has no /books, and
   // LittleFS will not create a parent directory on open().
-  LittleFS.mkdir(BOOKS_DIR);
-  LittleFS.remove(blobFile);
-  fs::File blobs = LittleFS.open(blobFile, "w");
+  fs.mkdir(BOOKS_DIR);
+  fs.remove(blobFile);
+  fs::File blobs = fs.open(blobFile, "w");
   if (!blobs) {
     *err = "blob open";
     return false;
@@ -336,9 +338,9 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
   VariantSpec specs[NEWS_VARIANT_COUNT];
   for (uint8_t v = 0; v < NEWS_VARIANT_COUNT; v++) specs[v] = variantSpec(v);
   for (uint8_t v = 0; v < NEWS_VARIANT_COUNT; v++) {
-    if (!paginateVariant(specs[v], textFile, blobs, meta[v], err)) {
+    if (!paginateVariant(fs, specs[v], textFile, blobs, meta[v], err)) {
       blobs.close();
-      LittleFS.remove(blobFile);
+      fs.remove(blobFile);
       return false;
     }
   }
@@ -355,9 +357,9 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
   }
   headerLen += bookGridExtLen(NEWS_VARIANT_COUNT);
 
-  fs::File out = LittleFS.open(bookPath(slug.c_str()).c_str(), "w");
+  fs::File out = fs.open(outPath.c_str(), "w");
   if (!out) {
-    LittleFS.remove(blobFile);
+    fs.remove(blobFile);
     *err = "book open";
     return false;
   }
@@ -399,7 +401,7 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
   }
 
   uint8_t buf[512];
-  fs::File blobIn = LittleFS.open(blobFile, "r");
+  fs::File blobIn = fs.open(blobFile, "r");
   if (!blobIn) {
     out.close();
     *err = "blob reopen";
@@ -411,7 +413,7 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
     if ((int)out.write(buf, (size_t)got) != got) {
       blobIn.close();
       out.close();
-      LittleFS.remove(blobFile);
+      fs.remove(blobFile);
       *err = "book write";
       return false;
     }
@@ -419,7 +421,7 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
   }
   blobIn.close();
   out.close();
-  LittleFS.remove(blobFile);
+  fs.remove(blobFile);
 
   for (uint8_t v = 0; v < NEWS_VARIANT_COUNT; v++) {
     pagesOut[v] = (uint32_t)meta[v].size();
@@ -432,8 +434,8 @@ bool writeTextBookImpl(const char *textFile, const char *blobFile,
 bool paginateToBook(const NewsFeed &feed, const String &title,
                     uint32_t *pagesOut, String *err) {
   uint32_t pages[NEWS_VARIANT_COUNT] = {0};
-  if (!writeTextBookImpl(feed.tmpFile, feed.blobFile, String(feed.slug), title,
-                         pages, err)) {
+  if (!writeTextBookImpl(LittleFS, feed.tmpFile, feed.blobFile,
+                         bookPath(feed.slug), title, pages, err)) {
     return false;
   }
 
@@ -491,7 +493,14 @@ namespace news_sync {
 bool writeTextBook(const char *textFile, const char *blobFile,
                    const String &slug, const String &title,
                    uint32_t pagesOut[NEWS_VARIANT_COUNT], String *err) {
-  return writeTextBookImpl(textFile, blobFile, slug, title, pagesOut, err);
+  return writeTextBookImpl(LittleFS, textFile, blobFile, bookPath(slug.c_str()),
+                           title, pagesOut, err);
+}
+
+bool writeTextBookOn(fs::FS &fs, const char *textFile, const char *blobFile,
+                     const String &outPath, const String &title,
+                     uint32_t pagesOut[NEWS_VARIANT_COUNT], String *err) {
+  return writeTextBookImpl(fs, textFile, blobFile, outPath, title, pagesOut, err);
 }
 
 String lastStamp() { return prefGetString(NVS_KEY_NEWS_STAMP); }

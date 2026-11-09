@@ -6,6 +6,7 @@
 #include <esp_system.h>
 #include <esp_task_wdt.h>
 
+#include "bench.h"
 #include "books.h"
 #include "config.h"
 #include "games.h"
@@ -15,6 +16,8 @@
 #include "panel.h"
 #include "pins.h"
 #include "rsvp.h"
+#include "sd_card.h"
+#include "sound_test.h"
 #include "ui.h"
 #include "wifi_check.h"
 #include "wifi_setup.h"
@@ -82,6 +85,22 @@ void logf(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   Serial.print(buf);
+}
+
+// READING_CPU_MHZ (config.h): the clock while a page or speed read is on
+// glass. Everything else, and anything with the radio above all, runs at
+// 240. applyCpuClock() follows the state after every event; cpuFull() goes
+// ahead of each radio call as well, so a path that reaches the radio without
+// passing through the menu still gets the full clock.
+const uint32_t CPU_FULL_MHZ = 240;
+
+void setCpuMhz(uint32_t mhz) {
+  if (getCpuFrequencyMhz() == mhz) return;
+  if (setCpuFrequencyMhz(mhz)) logf("cpu: %lu MHz\n", (unsigned long)mhz);
+}
+
+void cpuFull() {
+  if (READING_CPU_MHZ) setCpuMhz(CPU_FULL_MHZ);
 }
 
 // Arms the ESP32 task watchdog on the Arduino loop task. The core already
@@ -175,15 +194,18 @@ void showEmptyLibrary(const String &reason) {
   ui::renderMessage("muon reader", lines);
 }
 
-// "Flip screen": the rotation lives in NVS (NVS_NS_UI), 1 or 3, and the pad
-// turns with the picture whenever it differs from DISPLAY_ROTATION. Nothing
-// stored means DISPLAY_ROTATION, so a build that never flips is unchanged.
+// "Flip screen": the rotation lives in NVS (NVS_NS_UI), DISPLAY_ROTATION or
+// the one 180 degrees from it (1 or 3 on a portrait panel, 0 or 2 on the
+// landscape 5.79 inch bar), and the pad turns with the picture whenever it
+// differs from DISPLAY_ROTATION. Nothing stored, or a value that belongs to
+// another panel's pair, means DISPLAY_ROTATION, so a build that never flips
+// is unchanged.
 uint8_t storedRotation() {
   Preferences p;
   if (!p.begin(NVS_NS_UI, true)) return DISPLAY_ROTATION;
   uint8_t r = p.getUChar(NVS_KEY_UI_ROTATION, DISPLAY_ROTATION);
   p.end();
-  return (r == 1 || r == 3) ? r : DISPLAY_ROTATION;
+  return ui::validRotation(r) ? r : DISPLAY_ROTATION;
 }
 
 // Forgets the stored flip. Called whenever the panel choice changes: the new
@@ -204,7 +226,7 @@ void applyRotation(uint8_t r) {
 }
 
 void flipScreen() {
-  uint8_t next = (ui::rotation() == 1) ? 3 : 1;
+  uint8_t next = ui::flippedRotation(ui::rotation());
   Preferences p;
   if (p.begin(NVS_NS_UI, false)) {
     p.putUChar(NVS_KEY_UI_ROTATION, next);
@@ -270,7 +292,7 @@ bool prepareBookForPanel(Book &b, const String &slug) {
   String err;
   bool ok = books::reformat(slug, show, &err);
   if (!ok) logf("reformat %s failed: %s\n", slug.c_str(), err.c_str());
-  library = books::list();
+  library = books::listAll();
   return b.open(slug);
 }
 
@@ -313,6 +335,8 @@ String sensorHeader() {
   if (autoSyncSkipped) s += "   auto sync skipped";
   String stamp = news_sync::lastStamp();
   if (stamp.length()) s += "   synced " + stamp;
+  String card = sd_card::stateText();
+  if (card.length()) s += "   " + card;
   return s;
 }
 
@@ -335,7 +359,7 @@ void refreshLibrarySaved() {
 // one that is open. Rescan, and reopen the open book from its file so a
 // replaced book is not read through a stale page table; a deleted one closes.
 void reloadLibraryAfterServer() {
-  library = books::list();
+  library = books::listAll();
   if (book.isOpen()) {
     String slug = book.slug();
     if (!openBook(slug)) {
@@ -366,6 +390,7 @@ enum class MenuAction {
   FLIP_SCREEN,
   SCREEN,
   BUTTON_TEST,
+  SOUND_TEST,
 };
 
 struct MenuRow {
@@ -394,14 +419,19 @@ std::vector<MenuRow> menuRows() {
   // Speed read is only offered on glass it has been tuned on (the panel
   // table's speedReadSupported); elsewhere the tile does not exist.
   if (panel::speedReadSupported()) {
+    // ", turbo" when the panel has speed profiles and Turbo is on.
+    const bool turbo =
+        ui::activeSpeedProfile() && rsvp::mode() == speed::Mode::TURBO;
     rows.push_back(MenuRow("Speed read", String(rsvp::words()) + " word" +
                                (rsvp::words() > 1 ? "s" : "") + ", " +
-                               String(rsvp::wpm()) + " wpm",
+                               String(rsvp::wpm()) + " wpm" + (turbo ? ", turbo" : ""),
                            MenuAction::SPEED_READ, -1));
   }
   for (size_t i = 0; i < library.size(); i++) {
     String pos = "p. " + String((unsigned long)(library[i].savedPage + 1)) +
                  "/" + String((unsigned long)library[i].pageCount);
+    // A book on the microSD card says so on its tile.
+    if (library[i].onCard) pos = "card, " + pos;
     rows.push_back(MenuRow(library[i].title, pos, MenuAction::OPEN_BOOK, (int)i));
   }
   // The feed tiles only exist in a build with a token for their feed (see
@@ -431,7 +461,11 @@ std::vector<MenuRow> menuRows() {
   {
     // The way books get onto a finished reader, so the name says so.
     size_t n = games::romCount();
-    size_t nb = library.size();
+    // Books on flash only: card books are not on the server's list.
+    size_t nb = 0;
+    for (size_t i = 0; i < library.size(); i++) {
+      if (!library[i].onCard) nb++;
+    }
     rows.push_back(MenuRow("Books and games (WiFi)",
                            String((unsigned long)nb) + (nb == 1 ? " book, " : " books, ") +
                                String((unsigned long)n) + (n == 1 ? " rom" : " roms"),
@@ -453,6 +487,10 @@ std::vector<MenuRow> menuRows() {
   rows.push_back(MenuRow("Screen", panel::shortName(panel::active()),
                          MenuAction::SCREEN, -1));
   rows.push_back(MenuRow("Button test", "pad diagnostics", MenuAction::BUTTON_TEST, -1));
+  // Headphones module check; only on a build with the DAC's pins.
+  if (sound_test::fitted()) {
+    rows.push_back(MenuRow("Sound test", "both, left, right", MenuAction::SOUND_TEST, -1));
+  }
   return rows;
 }
 
@@ -602,6 +640,7 @@ bool waitForButtonOr(uint32_t ms) {
 // Runs a news sync with progress on the panel, then folds the result back into
 // the library. Returns true if the brief on the device changed.
 bool runNewsSync() {
+  cpuFull();
   bool changed = false;
   auto progress = [](const String &line) {
     std::vector<String> lines;
@@ -651,7 +690,7 @@ bool runNewsSync() {
     if (book.isOpen() && book.slug() == NEWS_SLUG) {
       openBook(NEWS_SLUG);
     }
-    library = books::list();
+    library = books::listAll();
     refreshLibrarySaved();
   }
   return changed;
@@ -756,6 +795,28 @@ void runButtonTest() {
   input::flush();
 }
 
+// Headphones module check (src/sound_test.*): the tone sweep, with what to
+// listen for on glass first. The sweep is short, so the screen just stays up
+// for it and the menu comes back afterwards.
+void runSoundTest() {
+  std::vector<String> lines;
+  lines.push_back("Playing now, in the headphones:");
+  lines.push_back("");
+  lines.push_back("  1. a low tone in both ears");
+  lines.push_back("  2. a short gap");
+  lines.push_back("  3. a high tone, LEFT ear only");
+  lines.push_back("  4. a high tone, RIGHT ear only");
+  ui::renderStatusScreen("Sound test", lines, true);
+  bool ok = sound_test::run();
+  logf("sound test: %s\n", ok ? "played" : "i2s did not start");
+  if (!ok) {
+    lines.clear();
+    lines.push_back("The sound output did not start.");
+    ui::renderStatusScreen("Sound test", lines);
+    waitForButtonOr(3000);
+  }
+}
+
 void enterJump() {
   if (!book.isOpen()) {
     openMenu();
@@ -773,15 +834,27 @@ void handleReading(Button b) {
     // on" and is a second next-page; UP is a second previous-page. The menu
     // still owns UP/DOWN for cursor movement, which is why this mapping lives
     // here and not in the shared handler.
-    // 2026-09-10: only the GPIO 1 (BTN_LEFT) and GPIO 41 (BTN_DOWN) pads
-    // survived the case build, so those two must cover both directions:
-    // BTN_LEFT is the founder's "right" = forward, BTN_DOWN = back.
+    // 2026-09-10: on the cased 5.76 inch unit only the GPIO 1 (BTN_LEFT) and
+    // GPIO 41 (BTN_DOWN) pads survived the case build (see include/pins.h),
+    // so those two must cover both directions: BTN_LEFT is the founder's
+    // "right" = forward, BTN_DOWN = back.
+#if defined(PINS_WIDE) && PINS_WIDE
+    // Wide reader (2026-11-08): RIGHT is next page and LEFT is previous page,
+    // so the two shoulder keys (input.cpp KEY_ACTS_AS) page both ways.
+    case BTN_RIGHT:
+      if (book.isOpen() && currentPage + 1 < book.pageCount()) {
+        setPage(currentPage + 1);
+      }
+      break;
+    case BTN_LEFT:
+#else
     case BTN_LEFT:
     case BTN_RIGHT:
       if (book.isOpen() && currentPage + 1 < book.pageCount()) {
         setPage(currentPage + 1);
       }
       break;
+#endif
     case BTN_DOWN:
     case BTN_UP:
       if (book.isOpen() && currentPage > 0) setPage(currentPage - 1);
@@ -851,6 +924,11 @@ bool moveGridCursor(Button b, int &cursor, int count) {
 // being read, mid page if speed read was last left on that same page.
 // Two settings tiles follow the books: Words (1/2/3 per flash) and Speed
 // (steps up by RSVP_WPM_STEP, wrapping); CENTER on one changes it in place.
+// A panel with speed profiles (ui::activeSpeedProfile) adds a third, Mode,
+// which toggles Normal and Turbo (rsvp::cycleMode).
+
+// Settings tiles after the books: Words, Speed, and Mode where it exists.
+int speedSettingTiles() { return ui::activeSpeedProfile() ? 3 : 2; }
 
 std::vector<ui::MenuTile> speedTiles() {
   std::vector<ui::MenuTile> out;
@@ -861,6 +939,10 @@ std::vector<ui::MenuTile> speedTiles() {
   }
   out.push_back(ui::MenuTile("Words", String(rsvp::words()) + " per flash"));
   out.push_back(ui::MenuTile("Speed", String(rsvp::wpm()) + " wpm"));
+  if (ui::activeSpeedProfile()) {
+    out.push_back(ui::MenuTile(
+        "Mode", rsvp::mode() == speed::Mode::TURBO ? "Turbo, more wear" : "Normal"));
+  }
   return out;
 }
 
@@ -916,7 +998,7 @@ void handleSpeedPicker(Button b) {
     openMenu();
     return;
   }
-  int count = books + 2;  // + Words, Speed
+  int count = books + speedSettingTiles();  // + Words, Speed (, Mode)
   if (speedCursor >= count) speedCursor = count - 1;
   if (moveGridCursor(b, speedCursor, count)) {
     ui::renderMenu("Speed read", speedTiles(), speedCursor);
@@ -926,7 +1008,8 @@ void handleSpeedPicker(Button b) {
       return;
     }
     if (speedCursor == books) rsvp::cycleWords();
-    else rsvp::cycleWpm();
+    else if (speedCursor == books + 1) rsvp::cycleWpm();
+    else rsvp::cycleMode();
     ui::renderMenu("Speed read", speedTiles(), speedCursor);
   }
 }
@@ -1049,19 +1132,23 @@ void handleMenu(Button b) {
           toggleTextSize();
           break;
         case MenuAction::SYNC_NEWS:
+          cpuFull();
           runNewsSync();
           menuCursor = 0;
           ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
           break;
         case MenuAction::WIFI_SETUP:
+          cpuFull();
           wifi_setup::run();
           ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
           break;
         case MenuAction::WIFI_CHECK:
+          cpuFull();
           wifi_check::run();
           ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
           break;
         case MenuAction::GAMES:
+          cpuFull();
           games::run();
           reloadLibraryAfterServer();
           ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
@@ -1083,6 +1170,10 @@ void handleMenu(Button b) {
           break;
         case MenuAction::BUTTON_TEST:
           runButtonTest();
+          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
+          break;
+        case MenuAction::SOUND_TEST:
+          runSoundTest();
           ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
           break;
       }
@@ -1220,7 +1311,13 @@ void pickerWaitRelease() {
 }
 
 // One picker frame on the live panel. Big type for the question, since the
-// point is to tell readable from garbled at a glance.
+// point is to tell readable from garbled at a glance. The question takes three
+// lines (baselines 110, 150, 190) unless the canvas is short; the 272 px bar
+// cannot fit that block above its rule at 248, and is wide enough for the
+// question on one line at baseline 56. Everything below hangs off the last
+// question baseline `q`: accent q + 24, panel name q + 70, then q + 94,
+// q + 134 and q + 154 (214, 260, 284, 324, 344 under the three lines; 80 to
+// 210 under the one).
 void pickerDraw(uint8_t id, int round) {
   const int x = TEXT_MARGIN_X;
   const int w = SCREEN_W - 2 * TEXT_MARGIN_X;
@@ -1229,20 +1326,28 @@ void pickerDraw(uint8_t id, int round) {
     ui::gfx().fillScreen(ui::INK_WHITE);
     ui::setInk(false);
     ui::setFont(ui::Font::LABEL);
-    ui::printAt(x, 110, ui::fitText("Press center", w));
-    ui::printAt(x, 150, ui::fitText("if you can", w));
-    ui::printAt(x, 190, ui::fitText("read this", w));
-    ui::gfx().fillRect(x, 214, ui::TILE_ACCENT_W, 2, ui::INK_BLACK);
+    int q = 190;
+    if (190 + 154 + 4 >= STATUS_RULE_Y &&
+        ui::textWidth("Press center if you can read this") <= w) {
+      q = 56;
+      ui::printAt(x, q, "Press center if you can read this");
+    } else {
+      ui::printAt(x, 110, ui::fitText("Press center", w));
+      ui::printAt(x, 150, ui::fitText("if you can", w));
+      ui::printAt(x, 190, ui::fitText("read this", w));
+    }
+    ui::gfx().fillRect(x, q + 24, ui::TILE_ACCENT_W, 2, ui::INK_BLACK);
     ui::setFont(ui::Font::STATUS_BOLD);
-    ui::printAt(x, 260, ui::fitText(panel::name(id), w));
+    ui::printAt(x, q + 70, ui::fitText(panel::name(id), w));
     ui::setFont(ui::Font::STATUS);
-    ui::printAt(x, 284,
+    ui::printAt(x, q + 94,
                 ui::fitText("Screen " + String((unsigned)id + 1) + " of " +
                                 String((unsigned)panel::count()) + ", round " +
                                 String(round + 1) + " of " + String(PICKER_ROUNDS),
                             w));
-    ui::printAt(x, 324, ui::fitText("Release center first if still held.", w));
-    ui::printAt(x, 344,
+    ui::printAt(x, q + 134,
+                ui::fitText("Release center first if still held.", w));
+    ui::printAt(x, q + 154,
                 ui::fitText("The next screen type is tried in " +
                                 String((unsigned long)(PICKER_WINDOW_MS / 1000)) +
                                 " s.",
@@ -1303,6 +1408,13 @@ void runBootPanelPicker() {
   pickerWaitRelease();
 }
 
+// Clock for the state the reader is in now (READING_CPU_MHZ, config.h).
+void applyCpuClock() {
+  if (!READING_CPU_MHZ) return;
+  const bool reading = state == AppState::READING || state == AppState::SPEED_READ;
+  setCpuMhz(reading ? READING_CPU_MHZ : CPU_FULL_MHZ);
+}
+
 }  // namespace
 
 void setup() {
@@ -1325,6 +1437,21 @@ void setup() {
     logf("LittleFS mount failed\n");
   }
 
+  // microSD module: no module or no card is not an error, the card books are
+  // just not there. New or changed .txt books are converted here, before the
+  // library scan below, with a status screen only when there is work to do.
+  if (sd_card::begin()) {
+    sd_card::prepare([](const String &title, int index, int total) {
+      std::vector<String> lines;
+      lines.push_back("Getting a book on the card ready");
+      lines.push_back("for this screen (" + String(index + 1) + " of " +
+                      String(total) + "):");
+      lines.push_back("");
+      lines.push_back(title);
+      ui::renderStatusScreen("microSD card", lines);
+    });
+  }
+
   {
     File f = LittleFS.open("/wdt.cnt", "r");
     if (f) {
@@ -1342,14 +1469,19 @@ void setup() {
     }
   }
 
-  Wire.begin(PIN_BME_SDA, PIN_BME_SCL);
-  bmeOk = bme.begin(BME280_ADDR_PRIMARY, &Wire) ||
-          bme.begin(BME280_ADDR_SECONDARY, &Wire);
+  // A build with no sensor pins (the wide reader, whose 17/18 carry the
+  // microSD module) skips the probe; the menu shows "sensor n/a" either way.
+  if (PIN_BME_SDA >= 0 && PIN_BME_SCL >= 0) {
+    Wire.begin(PIN_BME_SDA, PIN_BME_SCL);
+    bmeOk = bme.begin(BME280_ADDR_PRIMARY, &Wire) ||
+            bme.begin(BME280_ADDR_SECONDARY, &Wire);
+  }
   if (!bmeOk) logf("BME280 not found, menu will show sensor n/a\n");
 
   input::begin();
   applyRotation(storedRotation());
   rsvp::begin();
+  bench::begin();
 
   // The daily numbers feed used to be paginated into a book; since the grid
   // view it is a JSON file, and whatever the old version left in /books is
@@ -1357,7 +1489,7 @@ void setup() {
   LittleFS.remove(BOOKS_DIR "/" METRICS_SLUG ".pgs");
   LittleFS.remove(BOOKS_DIR "/" METRICS_SLUG ".pos");
 
-  library = books::list();
+  library = books::listAll();
   String slug = books::loadCurrentSlug();
   if (slug == METRICS_SLUG) slug = "";
   bool opened = false;
@@ -1410,6 +1542,7 @@ void setup() {
       autoSyncSkipped = true;
       logf("auto sync cancelled by button\n");
       input::flush();
+      applyCpuClock();
       return;
     }
     setBootSyncFlag(true);
@@ -1420,7 +1553,7 @@ void setup() {
     } else if (changed) {
       // Two feeds now land in the library; open the brief by slug rather
       // than whatever sorts first.
-      library = books::list();
+      library = books::listAll();
       if (!library.empty() &&
           (openBook(NEWS_FEEDS[0].slug) || openBook(library[0].slug))) {
         state = AppState::READING;
@@ -1434,10 +1567,12 @@ void setup() {
   }
 
   input::flush();
+  applyCpuClock();
 }
 
 void loop() {
   esp_task_wdt_reset();
+  bench::poll();
   if (state == AppState::JUMP) pumpJumpHold();
   if (state == AppState::SPEED_READ && rsvp::tick()) {
     // A flash holds the loop for ~420 ms. Drop what the debouncer half saw
@@ -1478,7 +1613,7 @@ void loop() {
         break;
       case AppState::EMPTY:
         if (b == BTN_CENTER) {
-          library = books::list();
+          library = books::listAll();
           if (!library.empty() && openBook(library[0].slug)) {
             state = AppState::READING;
             renderCurrentPage(true);
@@ -1492,6 +1627,7 @@ void loop() {
     // refresh with nobody polling. Discard whatever piled up in that window so
     // the next page turn is one the reader actually saw.
     input::flush();
+    applyCpuClock();
   }
   delay(BUTTON_POLL_MS);
 }

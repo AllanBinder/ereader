@@ -299,6 +299,7 @@ void GxEPD2_576_T81_Fast::_writeBuffer_interleaved(const uint8_t* old_buf, const
                 new_b = new_buf[idx];
             }
             if (invert) new_b = ~new_b;
+            if (_drive_all) old_b = ~new_b;  // every pixel a transition, see setDriveAll
             uint8_t hi, lo;
             interleave1to2(old_b, new_b, hi, lo);
             rowbuf[col * 2] = hi;
@@ -312,9 +313,12 @@ void GxEPD2_576_T81_Fast::_writeBuffer_interleaved(const uint8_t* old_buf, const
 void GxEPD2_576_T81_Fast::_Init_Common(bool quick_reset) {
     if (quick_reset) {
         // Short pulse for the waveform cut: the stock _reset() spends ~40 ms
-        // in delays, most of a cut flash's budget.
-        digitalWrite(_rst, LOW); delayMicroseconds(200);
-        digitalWrite(_rst, HIGH); delayMicroseconds(500);
+        // in delays, most of a cut flash's budget. 200 us low / 500 us high
+        // was enough on the first panel batch; the second batch (2026-10)
+        // intermittently ran a noisy, heavily ghosting waveform until the
+        // next full init at those widths, so 2 ms each.
+        digitalWrite(_rst, LOW); delay(2);
+        digitalWrite(_rst, HIGH); delay(2);
     } else {
         _reset();
         delay(10);

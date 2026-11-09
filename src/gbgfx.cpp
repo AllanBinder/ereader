@@ -1,5 +1,7 @@
 #include "gbgfx.h"
 
+#include <algorithm>
+
 #include "config.h"
 #include "pack.h"
 #include "pokemon_state.h"
@@ -24,6 +26,26 @@ int layNum = 1, layDen = 1;
 int layOx = 0, layOy = 0;
 int layH = 0;
 
+// The page setLayout() was given, and the fold (layFold 0 = none). A folded
+// page's second column starts layCol2 panel px right of the first.
+int layDesignW = 0, layDesignH = 0;
+int layFold = 0, layBodyTop = 0, layBodyBottom = 0;
+int layTallest = 0;  // bottom of the taller column, in design rows
+int layCol2 = 0;
+const int FOLD_GAP = 16;  // design px between the two columns
+
+// Which part of the page design row `y` is in: the rows it moves up by, and
+// the panel x offset of its column. Unfolded, every row is (0, 0).
+int foldShift(int y, int &colPx) {
+  colPx = 0;
+  if (!layFold || y < layFold) return 0;
+  if (y < layBodyBottom) {
+    colPx = layCol2;
+    return layFold - layBodyTop;
+  }
+  return layBodyBottom - layTallest;
+}
+
 // Floor division that stays right for a negative design coordinate.
 int scaleFloor(int v) {
   long n = (long)v * layNum;
@@ -34,10 +56,12 @@ int scaleFloor(int v) {
 
 // The panel rectangle a design rectangle covers, clamped to at least 1 px.
 void mapRect(int x, int y, int w, int h, int &px, int &py, int &pw, int &ph) {
-  px = layOx + scaleFloor(x);
-  py = layOy + scaleFloor(y);
-  pw = layOx + scaleFloor(x + w) - px;
-  ph = layOy + scaleFloor(y + h) - py;
+  int col;
+  const int dy = foldShift(y, col);
+  px = layOx + col + scaleFloor(x);
+  py = layOy + scaleFloor(y - dy);
+  pw = layOx + col + scaleFloor(x + w) - px;
+  ph = layOy + scaleFloor(y + h - dy) - py;
   if (w > 0 && pw < 1) pw = 1;
   if (h > 0 && ph < 1) ph = 1;
 }
@@ -93,25 +117,64 @@ void blockForShade(int px, int py, int scale, uint8_t shade, bool dither) {
 
 namespace gbgfx {
 
+// The ratio that fits a w x h page on the canvas: the smaller of the two
+// fits, as a fraction, never above 1. Cross multiplied: SCREEN_W/w <
+// SCREEN_H/h.
+void fitRatio(int w, int h, int &num, int &den) {
+  if ((long)SCREEN_W * h < (long)SCREEN_H * w) {
+    num = SCREEN_W;
+    den = w;
+  } else {
+    num = SCREEN_H;
+    den = h;
+  }
+  if (num >= den) num = den = 1;
+}
+
 void setLayout(int designW, int designH) {
   if (designW < 1 || designH < 1) return;
-  // The ratio is the smaller of the two fits, as a fraction, never above 1.
-  // Cross multiplied: SCREEN_W/designW < SCREEN_H/designH.
-  if ((long)SCREEN_W * designH < (long)SCREEN_H * designW) {
-    layNum = SCREEN_W;
-    layDen = designW;
-  } else {
-    layNum = SCREEN_H;
-    layDen = designH;
-  }
-  if (layNum >= layDen) layNum = layDen = 1;
+  layDesignW = designW;
+  layDesignH = designH;
+  layFold = 0;
+  layCol2 = 0;
+  fitRatio(designW, designH, layNum, layDen);
   layOx = (SCREEN_W - scaleFloor(designW)) / 2;
   layOy = 0;
   layH = scaleFloor(designH);
 }
 
+void setFold(int foldY, int bodyTop, int bodyBottom) {
+  if (layDesignW < 1) return;
+  setLayout(layDesignW, layDesignH);
+  if (foldY <= bodyTop || foldY >= bodyBottom || bodyBottom > layDesignH) {
+    return;
+  }
+  // The folded page: the taller of the two columns, then the rows below
+  // bodyBottom; two columns and the gap across.
+  const int tallest = std::max(foldY, bodyBottom - foldY + bodyTop);
+  const int foldedW = 2 * layDesignW + FOLD_GAP;
+  const int foldedH = tallest + (layDesignH - bodyBottom);
+  int num, den;
+  fitRatio(foldedW, foldedH, num, den);
+  // Keep the plain page unless folding makes it bigger: num/den > layNum/layDen.
+  if ((long)num * layDen <= (long)layNum * den) return;
+  layNum = num;
+  layDen = den;
+  layFold = foldY;
+  layBodyTop = bodyTop;
+  layBodyBottom = bodyBottom;
+  layTallest = tallest;
+  layCol2 = scaleFloor(layDesignW + FOLD_GAP);
+  layOx = (SCREEN_W - scaleFloor(foldedW)) / 2;
+  layOy = 0;
+  layH = scaleFloor(foldedH);
+}
+
 int mapX(int x) { return layOx + scaleFloor(x); }
-int mapY(int y) { return layOy + scaleFloor(y); }
+int mapY(int y) {
+  int col;
+  return layOy + scaleFloor(y - foldShift(y, col));
+}
 int layoutHeight() { return layH; }
 
 void fillRect(int x, int y, int w, int h, uint16_t color) {
@@ -226,7 +289,9 @@ int printGb(int x, int y, const char *ascii, int scale, bool inverted) {
     // returns is converted back to design space (exact on panel 0).
     ui::setFont(ui::Font::STATUS);
     ui::setInk(inverted);
-    ui::printAt(mapX(x), mapY(y + 8 * scale - 2), String(ascii));
+    int col;
+    foldShift(y, col);
+    ui::printAt(mapX(x) + col, mapY(y + 8 * scale - 2), String(ascii));
     ui::setInk(false);
     int w = ui::textWidth(String(ascii));
     return x + (int)((long)w * layDen / layNum);

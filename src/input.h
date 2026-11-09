@@ -39,6 +39,14 @@ void flush();
 bool takeLatched(Button &out);
 void clearLatched();
 
+// Which physical input produced the event poll() or takeLatched() returned
+// last: 0..4 the d-pad lines (Button order), 5 and 6 the shoulder keys K1
+// (left key) and K2 (right key). A mode that gives the shoulder keys their
+// own meaning reads this right
+// after the event.
+static const int INPUT_K1 = BTN_COUNT, INPUT_K2 = BTN_COUNT + 1;
+int lastSource();
+
 // Raw debounced state of every button as a bitmask, bit i = Button i pressed.
 // This is the unfiltered pad, not the event queue: the button test screen uses
 // it to show which lines a single press actually pulls.

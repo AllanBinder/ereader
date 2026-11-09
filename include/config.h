@@ -31,53 +31,62 @@ static const uint16_t PARTIALS_BEFORE_FULL = 10;
 // in NVS_NS_UI), so every size below that depends on it is a global filled by
 // panel::applyGeometry() before the first frame is drawn, not a constant. The
 // names are unchanged, so call sites read them exactly as before. Values are
-// written out for both panels:
+// written out for every panel, in id order:
 //   0  Good Display GDEH0576T81, 5.76 inch, 920x680 native, on a DESPI-C02
 //      adapter: portrait canvas 680 wide by 920 tall.
 //   1  Waveshare 7.5 inch V2, 800x480 native: portrait canvas 480 by 800.
-// The UI is PORTRAIT on every panel: the native frame is landscape and an odd
-// rotation turns it. Everything below is derived from the canvas width and
-// height. The initial values are panel 0's, so a file scope initializer that
-// copies one of these before setup() sees the 5.76 inch layout; code that
-// must follow the active panel reads the global at draw time instead.
-extern int SCREEN_W;  // 680 | 480
-extern int SCREEN_H;  // 920 | 800
+//   2  Good Display GDEY0579T93, 5.79 inch, 792x272 native (two SSD1683s in
+//      cascade), on a DESPI-C02: LANDSCAPE canvas 792 wide by 272 tall.
+// Every native frame is landscape. The UI is PORTRAIT on panels 0 and 1, where
+// an odd rotation turns the frame on its side, and LANDSCAPE on panel 2, where
+// an even rotation keeps it: a 272 px wide page would be 20 columns of text.
+// Everything below is derived from the canvas width and height. The initial
+// values are panel 0's, so a file scope initializer that copies one of these
+// before setup() sees the 5.76 inch layout; code that must follow the active
+// panel reads the global at draw time instead.
+extern int SCREEN_W;  // 680 | 480 | 792
+extern int SCREEN_H;  // 920 | 800 | 272
 
 // Rotation passed to GxEPD2's setRotation(), copied from the active panel's
-// row in the table in src/panel.cpp. The panel's native frame is landscape,
-// so an odd rotation is what makes the canvas portrait.
+// row in the table in src/panel.cpp (Spec::uiRotation). The panel's native
+// frame is landscape, so an odd rotation is what makes the canvas portrait.
+//   0 = native frame, landscape (panel 2).
 //   1 = 90 degrees clockwise: on the 5.76 inch panel the FPC tail exits on
 //       the LEFT edge of the portrait page (native top edge becomes the left).
+//   2 = 180 degrees, landscape, image flipped relative to rotation 0.
 //   3 = 270 degrees: the opposite edge, image flipped 180 degrees relative to
 //       rotation 1.
-// Default 1 on every panel. If a panel's first portrait frame comes up upside
-// down on the bench, change its row in the table to 3 and reflash; nothing
-// else in the firmware cares.
+// Default 1 on the portrait panels and 0 on panel 2. If a panel's first frame
+// comes up upside down on the bench, change its row in the table by 2 (1 to 3,
+// 0 to 2) and reflash; nothing else in the firmware cares.
 extern uint8_t DISPLAY_ROTATION;
 
 // "Flip screen" in the menu turns the picture 180 degrees at runtime (rotation
-// 1 <-> 3) for anyone running a prebuilt image who cannot edit the table. The
+// 1 <-> 3, or 0 <-> 2 on panel 2) for anyone running a prebuilt image who
+// cannot edit the table. The
 // choice lives in NVS, so it survives reflashing and uploadfs. Until it is
 // used, DISPLAY_ROTATION is what the panel runs at. While the picture is
 // turned away from DISPLAY_ROTATION the pad is turned with it (UP swaps with
 // DOWN, LEFT with RIGHT), so "up" stays up for the reader.
 #define NVS_NS_UI "ui"
 #define NVS_KEY_UI_ROTATION "rot"
-// Panel id (u8, see src/panel.h). Missing = 0, the GDEH0576T81.
+// Panel id (u8, see src/panel.h). Missing = the build's DEFAULT_PANEL_ID: 0,
+// the GDEH0576T81, except in [env:esp32s3_579], which builds with 2.
 #define NVS_KEY_UI_PANEL "panel"
 
 // Status strip at the bottom of every screen. Same proportions as the earlier
 // landscape build: the rule sits STATUS_STRIP_H px above the bottom edge and
 // the status baseline STATUS_BASELINE_INSET px above that edge. On panel 0
-// that is 920 - 24 = 896 and 920 - 8 = 912; on panel 1, 776 and 792.
+// that is 920 - 24 = 896 and 920 - 8 = 912; on panel 1, 776 and 792; on
+// panel 2, 248 and 264.
 static const int STATUS_STRIP_H = 24;
 static const int STATUS_BASELINE_INSET = 8;
-extern int STATUS_RULE_Y;      // SCREEN_H - STATUS_STRIP_H: 896 | 776
-extern int STATUS_BASELINE_Y;  // SCREEN_H - STATUS_BASELINE_INSET: 912 | 792
+extern int STATUS_RULE_Y;      // SCREEN_H - STATUS_STRIP_H: 896 | 776 | 248
+extern int STATUS_BASELINE_Y;  // SCREEN_H - STATUS_BASELINE_INSET: 912 | 792 | 264
 
 // Content area: full width, everything above the status rule.
-extern int CONTENT_W;  // SCREEN_W: 680 | 480
-extern int CONTENT_H;  // STATUS_RULE_Y: 896 | 776
+extern int CONTENT_W;  // SCREEN_W: 680 | 480 | 792
+extern int CONTENT_H;  // STATUS_RULE_Y: 896 | 776 | 248
 
 // Text grid (shared pagination contract with the host converter). These must
 // match tools/pdf2book.py GRIDS exactly, or host pagination and on-glass
@@ -97,9 +106,12 @@ extern int CONTENT_H;  // STATUS_RULE_Y: 896 | 776
 // / 24 = 36 (865/24), so 37 rows: the 37th baseline is 26 + 36*24 = 890 and
 // its descender ends at 894, just clear of the rule at 896. A 38th would land
 // at 914, past the rule. Panel 1: 448/12 = 37 columns, (776 - 1 - 4 - 26)/24
-// = 31 (745/24), so 32 rows.
-extern int TEXT_COLS;  // 54 | 37
-extern int TEXT_ROWS;  // 37 | 32
+// = 31 (745/24), so 32 rows. Panel 2: 760/12 = 63 columns (4 px spare),
+// (248 - 1 - 4 - 26)/24 = 9 (217/24), so 10 rows: the 10th baseline is
+// 26 + 9*24 = 242 and its descender ends at 246, clear of the rule at
+// 248. A short, wide page: 630 characters against panel 0's 1998.
+extern int TEXT_COLS;  // 54 | 37 | 63
+extern int TEXT_ROWS;  // 37 | 32 | 10
 static const int TEXT_MARGIN_X = 16;
 static const int TEXT_FIRST_BASELINE_Y = 26;
 static const int TEXT_LINE_PITCH = 24;
@@ -112,9 +124,11 @@ static const int TEXT_DESCENT = 4;
 // pitch 32 puts baseline n at 32*n, and (896 - 1 - 5 - 32)/32 = 26 (858/32),
 // so 27 rows: the 27th is 864 and its descender ends at 869, clear of 896. A
 // 28th baseline would land at 896, on the rule itself. Panel 1: 448/16 = 28
-// columns, (776 - 1 - 5 - 32)/32 = 23 (738/32), so 24 rows.
-extern int TEXT_LARGE_COLS;  // 40 | 28
-extern int TEXT_LARGE_ROWS;  // 27 | 24
+// columns, (776 - 1 - 5 - 32)/32 = 23 (738/32), so 24 rows. Panel 2:
+// 760/16 = 47.5, floored to 47 columns, (248 - 1 - 5 - 32)/32 = 6 (210/32),
+// so 7 rows: the 7th baseline is 224 and its descender ends at 229.
+extern int TEXT_LARGE_COLS;  // 40 | 28 | 47
+extern int TEXT_LARGE_ROWS;  // 27 | 24 | 7
 static const int TEXT_LARGE_FIRST_BASELINE_Y = 32;
 static const int TEXT_LARGE_LINE_PITCH = 32;
 static const int TEXT_LARGE_ADVANCE = 16;
@@ -148,7 +162,8 @@ static const uint8_t MPG1_IMAGE_FLAG_DOUBLE = 0x01;  // draw each pixel as 2x2
 // read on another (an oversize page is scaled down to fit at draw time), so
 // the ceiling is the largest content bitmap of ANY panel in the table, not the
 // active one, rounded up to the next 1000 bytes for headroom: 77000 today
-// (panel 1's 60*776 = 46560 is smaller). Filled by panel::applyGeometry().
+// (panel 1's 60*776 = 46560 and panel 2's landscape 99*248 = 24552 are
+// smaller). Filled by panel::applyGeometry().
 extern uint32_t MPG1_MAX_IMAGE_BYTES;
 
 // Filesystem layout.
@@ -401,14 +416,28 @@ static const uint32_t NET_TIME_SANE_EPOCH = 1735689600UL;
 // ceiling. A 60 ms cut is the most ghosting judged fine to ship; 100 ms ghosts
 // less at ~245 wpm. Normal reading keeps 10 MHz, the internal sensor and the
 // full waveform; only the mode switches.
-// All of this is tuned for panel 0. A panel whose row in src/panel.cpp says
-// speed read is unsupported never gets the fast drive (ui::setSpeedDrive and
-// ui::setSpeedCut do nothing there) and the menu should hide the mode.
+// All of this is tuned for panel 0. RSVP_SPI_HZ, RSVP_WPM_MAX_BY_WORDS,
+// RSVP_FULL_AFTER and RSVP_FULL_MAX are panel 0's values: the per-panel
+// copies (speedSpiHz, speedWpmMax, speedFullAfter, speedFullMax) live in the
+// table in src/panel.cpp, which reads these for panel 0, and rsvp.cpp reads
+// the active panel's row. A panel whose row says speed read is unsupported
+// never gets the fast drive (ui::setSpeedDrive and ui::setSpeedCut do nothing
+// there) and the menu should hide the mode. A supported panel on a stock
+// driver (ui::speedHooksActive false) would get its own SPI clock but no LUT,
+// cut or push; every supported panel in the table has a custom driver today.
+// A panel row with speed profiles (panel 2, src/speed_profile.h) takes its
+// top speeds, cadence and drive from the active profile instead.
 // Words per flash is a setting (1-3, picker tile, NVS); 2 is the default.
 // The cut is automatic: a flash is only cut when the time it stays on glass
 // (interval x dwell) is shorter than RSVP_UNCUT_MIN_MS, the full uncut flash
 // (54 ms SPI + 367 ms drive) plus margin. So slow settings, and the longer
-// sentence-end holds at mid speeds, run the complete waveform.
+// sentence-end holds at mid speeds, run the complete waveform. A flash that
+// must be cut is cut as late as its hold allows: hold minus
+// RSVP_CUT_OVERHEAD_MS (54 ms SPI, ~90 ms controller re-init, compose and
+// margin), never below RSVP_CUT_MS. The second panel batch (2026-10) grays
+// the whole static frame within 5 to 10 flashes at a fixed 60 ms cut (3 words
+// at 425 wpm) and is clean uncut (400 wpm), so the drive is stretched to the
+// budget instead of fixed at the floor.
 static const int RSVP_WORDS_DEFAULT = 2;
 static const uint32_t RSVP_UNCUT_MIN_MS = 450;
 // Hold multipliers for a chunk that ends a sentence (or paragraph) and one
@@ -421,6 +450,8 @@ static const int RSVP_WPM_MIN = 100;
 // cut (~205 ms a flash) for 1 word, and kept readable for 2 and 3.
 static const int RSVP_WPM_MAX_BY_WORDS[4] = {0, 300, 500, 600};
 static const int RSVP_WPM_STEP = 25;
+// Wide reader: a second CENTER tap within this many ms exits speed read.
+static const uint32_t RSVP_EXIT_TAP_MS = 700;
 // Ghost clearing full refresh at the first sentence (or paragraph) end once
 // this many partials have run since the last full, and unconditionally at
 // RSVP_FULL_MAX so a run-on sentence cannot stretch the cycle. 2 words at
@@ -432,7 +463,71 @@ static const int RSVP_REWIND_CHUNKS = 10;
 static const uint32_t RSVP_SPI_HZ = 40000000;
 static const int RSVP_LUT_TEMP = 40;
 static const int RSVP_CUT_MS = 60;
+static const uint32_t RSVP_CUT_OVERHEAD_MS = 170;
+// White push: even at the longest cut the budget allows, the second panel
+// batch slowly grays its static frame above 400 wpm (3 words), and a normal
+// partial never drives unchanged pixels, so nothing restores it short of a
+// full refresh. Once RSVP_PUSH_AFTER cut flashes have run since the last
+// push or full, the next flash drives every pixel toward its own value
+// instead, cut or not: a cut push still drives the whole frame for 150+ ms,
+// enough to bring the static black back. Pushing only on uncut flashes
+// (sentence ends) let static black fade visibly in between at 550 wpm. The
+// RSVP_FULL_* cadence below stays as the backstop.
+static const int RSVP_PUSH_AFTER = 1;
 // Words per minute, NVS namespace NVS_NS_UI.
 #define NVS_KEY_RSVP_WPM "rsvpwpm"
 // Words per flash, NVS namespace NVS_NS_UI.
 #define NVS_KEY_RSVP_WORDS "rsvpwords"
+// Speed mode (speed::Mode, u8: 0 Normal, 1 Turbo), NVS namespace NVS_NS_UI.
+// Only meaningful on a panel with speed profiles (src/speed_profile.h).
+#define NVS_KEY_RSVP_MODE "rsvpmode"
+
+// Temperature compensation of the custom speed read LUT (src/speed_profile.*).
+// The panel temperature is estimated as the ESP32-S3 internal sensor minus
+// SPEED_TEMP_OFFSET_C (the die runs warmer than the air around the glass).
+// Default pending bench: compare against a thermometer at the panel.
+static const int SPEED_TEMP_OFFSET_C = 10;
+// Frames added to a profile's custom LUT frames by panel temperature: the
+// first row whose belowC is above the estimate wins (cold glass is slow, so
+// it gets more frames; warm glass fewer). An unknown temperature applies no
+// step. Defaults pending bench (fridge test at ~10 C and a warm room):
+// below 5 C +4, below 12 C +2, 12..32 C none, above 32 C -1.
+struct SpeedTempStep {
+  int8_t belowC;  // applies when the estimate in C is below this
+  int8_t frames;  // frames added (negative = removed)
+};
+static const SpeedTempStep SPEED_TEMP_STEPS[] = {
+    {5, 4},
+    {12, 2},
+    {33, 0},
+    {127, -1},
+};
+
+// Reading CPU clock. 0 = leave the clock alone (240 MHz), the default until
+// the current draw has been measured. Nonzero: the reader drops to this many
+// MHz while a page or speed read is on glass, and goes back to 240 before
+// anything with the radio (WiFi setup and check, sync, the books and games
+// server) and in every other screen. Use 160 or 80:
+// below 80 the APB clock drops with it, which slows the panel's SPI and WiFi
+// will not start.
+static const uint32_t READING_CPU_MHZ = 0;
+
+// microSD expansion module (pins.h PIN_SD_*; absent when PIN_SD_CS is -1).
+// FAT32 card, plain text books as .txt files in /books at the card root. At
+// boot each one is paginated on the device with the WiFi upload's text book
+// writer (news_sync::writeTextBookOn) and the result is kept on the card in
+// SD_CONVERTED_DIR, next to a .src file with the size of the .txt it came
+// from, so the next boot reuses it unless the .txt changed or the panel's
+// grid did. Reading positions for card books live there too, so nothing for
+// a card book is written to LittleFS except /current.txt. Card books carry
+// slugs starting with CARD_SLUG_PREFIX ('.' never appears in a slug made by
+// the upload or the host tools). The card is only looked at during boot: a
+// card put in later needs a restart.
+static const uint32_t SD_SPI_HZ = 10000000;
+#define SD_BOOKS_DIR "/books"
+#define SD_CONVERTED_DIR "/books/.reader"
+#define CARD_SLUG_PREFIX "sd."
+// A .txt larger than this is skipped (same cap as a WiFi upload).
+static const uint32_t SD_MAX_TXT_BYTES = BOOK_MAX_TXT_BYTES;
+// At most this many card books are listed; the rest of the folder is ignored.
+static const int SD_MAX_BOOKS = 64;

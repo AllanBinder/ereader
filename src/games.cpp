@@ -97,17 +97,6 @@ void setWdtTimeout(uint32_t ms) {
 #endif
 }
 
-// Streaming a 130 KB script to a phone on a weak link can take longer than
-// the normal 8 s window, and handleClient() cannot feed the watchdog while it
-// streams. Same trick as the news sync.
-struct WdtWindow {
-  WdtWindow() { setWdtTimeout(NEWS_WDT_TIMEOUT_MS); }
-  ~WdtWindow() {
-    esp_task_wdt_reset();
-    setWdtTimeout(WDT_TIMEOUT_MS);
-  }
-};
-
 void touch() {
   requests++;
   lastRequestMs = millis();
@@ -205,32 +194,9 @@ String baseName(const String &raw) {
   return base;
 }
 
-// The host converters' slug rule (tools/pdf2book.py slugify): lowercase, every
-// run of characters outside [a-z0-9] becomes one '_', no '_' at either end,
-// cut to BOOK_SLUG_MAX. The feed slugs are taken, so a book called "news"
-// becomes "news_book" instead of being overwritten by the next sync.
-String slugify(const String &stem) {
-  String lower = stem;
-  lower.toLowerCase();
-  String out;
-  bool pendingSep = false;
-  for (size_t i = 0; i < lower.length(); i++) {
-    char c = lower[i];
-    bool keep = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-    if (!keep) {
-      pendingSep = out.length() > 0;
-      continue;
-    }
-    if (pendingSep) out += '_';
-    pendingSep = false;
-    out += c;
-  }
-  if ((int)out.length() > BOOK_SLUG_MAX) out = out.substring(0, BOOK_SLUG_MAX);
-  while (out.endsWith("_")) out.remove(out.length() - 1);
-  if (!out.length()) out = "book";
-  if (out == NEWS_SLUG || out == METRICS_SLUG) out += "_book";
-  return out;
-}
+// The slug and title rules are shared with the microSD card books, so they
+// live in books.cpp.
+using books::slugify;
 
 // A slug as it arrives in a delete request. Books put on the filesystem with
 // uploadfs follow the host slug rule, but be lenient and accept anything the
@@ -246,40 +212,8 @@ bool validBookSlug(const String &slug) {
 String bookPathFor(const String &slug) { return String(BOOKS_DIR "/") + slug + ".pgs"; }
 String bookPosFor(const String &slug) { return String(BOOKS_DIR "/") + slug + ".pos"; }
 
-// A title for the library: control characters dropped, runs of spaces folded,
-// cut to BOOK_TITLE_MAX characters (UTF-8 aware, never splits a character).
-String cleanTitle(const String &raw) {
-  String out;
-  bool space = false;
-  int chars = 0;
-  for (size_t i = 0; i < raw.length(); i++) {
-    uint8_t c = (uint8_t)raw[i];
-    if (c < 0x20 || c == 0x7F || c == ' ') {
-      space = out.length() > 0;
-      continue;
-    }
-    bool lead = (c & 0xC0) != 0x80;
-    if (lead) {
-      if (chars >= BOOK_TITLE_MAX) break;
-      if (space) {
-        out += ' ';
-        chars++;
-      }
-      space = false;
-      chars++;
-    }
-    out += (char)c;
-  }
-  return out;
-}
-
-// Upload stem to a readable title: "alice_in_wonderland" -> "alice in wonderland".
-String titleFromStem(const String &stem) {
-  String t = stem;
-  t.replace('_', ' ');
-  t.replace('-', ' ');
-  return cleanTitle(t);
-}
+using books::cleanTitle;
+using books::titleFromStem;
 
 String jsonEscape(const String &s) {
   String out;
@@ -405,14 +339,17 @@ void handleUploadData() {
       return;
     }
     uploadIsAux = packExtension(uploadName);
-    uploadFreeAtStart = fsFreeBytes();
     // A pack is read while the screen draws, so it cannot be rewritten under
     // the open File.
     if (uploadIsAux) {
       gbgfx::reset();
       pokemon_views::reset();
       pack::close();
+      // Replacing a pack: drop the old copy first, since the flash rarely has
+      // room for the old pack and the staged new one at the same time.
+      LittleFS.remove(romPath(uploadName));
     }
+    uploadFreeAtStart = fsFreeBytes();
     LittleFS.mkdir(GAMES_DIR);
     LittleFS.mkdir(uploadIsAux ? GAMES_AUX_DIR : GAMES_ROM_DIR);
     uploadFile = LittleFS.open(romPath(uploadName) + ".tmp", "w");
@@ -939,6 +876,40 @@ void drawCompanion() { pokemon_views::draw(auxPage, auxTerrain); }
 
 namespace games {
 
+WdtWindow::WdtWindow() { setWdtTimeout(NEWS_WDT_TIMEOUT_MS); }
+
+WdtWindow::~WdtWindow() {
+  esp_task_wdt_reset();
+  setWdtTimeout(WDT_TIMEOUT_MS);
+}
+
+NetLink netUp() {
+  NetLink link;
+  WiFi.persistent(false);
+  if (!wifi_store::list().empty()) {
+    String ssid;
+    if (wifi_connect(&ssid)) link.ssid = ssid;
+  }
+
+  // The AP rides alongside the station link; both reach the same server.
+  WiFi.mode(WIFI_AP_STA);
+  IPAddress apIp(192, 168, 4, 1);
+  WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(GAMES_AP_SSID, GAMES_AP_PASSWORD);
+
+  if (link.ssid.length()) {
+    link.mdns = MDNS.begin(GAMES_MDNS_HOST);
+    if (link.mdns) MDNS.addService("http", "tcp", 80);
+  }
+  return link;
+}
+
+void netDown(const NetLink &link) {
+  if (link.mdns) MDNS.end();
+  WiFi.softAPdisconnect(true);
+  wifi_off();
+}
+
 size_t romCount() {
   size_t n = 0;
   fs::File dir = LittleFS.open(GAMES_ROM_DIR, "r");
@@ -1006,22 +977,9 @@ void run() {
   pokemon::wramInvalidate();
   pack::open();   // stays open for the life of the server
 
-  WiFi.persistent(false);
-  if (!wifi_store::list().empty()) {
-    String ssid;
-    if (wifi_connect(&ssid)) stationSsid = ssid;
-  }
-
-  // The AP rides alongside the station link; both reach the same server.
-  WiFi.mode(WIFI_AP_STA);
-  IPAddress apIp(192, 168, 4, 1);
-  WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(GAMES_AP_SSID, GAMES_AP_PASSWORD);
-
-  if (stationSsid.length()) {
-    mdnsUp = MDNS.begin(GAMES_MDNS_HOST);
-    if (mdnsUp) MDNS.addService("http", "tcp", 80);
-  }
+  NetLink link = netUp();
+  stationSsid = link.ssid;
+  mdnsUp = link.mdns;
 
   server = new WebServer(80);
   // Only collected headers are readable from a handler.
@@ -1149,12 +1107,10 @@ void run() {
   server->stop();
   delete server;
   server = nullptr;
-  if (mdnsUp) MDNS.end();
   gbgfx::reset();
   pokemon_views::reset();
   pack::close();
-  WiFi.softAPdisconnect(true);
-  wifi_off();
+  netDown(link);
   Serial.printf("games: down after %lu requests\n", (unsigned long)requests);
 }
 

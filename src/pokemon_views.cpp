@@ -43,7 +43,8 @@ using pokemon::Mon;
 
 // Every coordinate in this file is in the 680x920 design space of the layout
 // doc; gbgfx::setLayout() maps it onto the active canvas (identity on panel
-// 0, a 480/680 shrink to 480x649 on the 7.5 inch panel). Draw through gbgfx
+// 0, a 480/680 shrink to 480x649 on the 7.5 inch panel, folded into two
+// columns on the 792x272 bar, see the fold rows below). Draw through gbgfx
 // (printGb, drawTile*, gbgfx::fillRect) rather than ui::gfx() so a coordinate
 // is never read as a panel pixel. The only panel space pieces are the two
 // black bands, which run the full canvas width, and the hint band, which is
@@ -54,6 +55,28 @@ const int TOP_BAR_H = 24;
 const int HINT_Y = DESIGN_H - 24;   // 896
 const int HINT_TEXT_Y = HINT_Y + 4;  // 900
 const int BAR_TEXT_Y = 4;
+
+// Fold rows (see gbgfx::setFold), one per view, each in the white gap between
+// two boxes of the layout doc. On a wide short canvas the body below the row
+// is set beside the body above it, moved up so the row lands on FOLD_TOP (a
+// box 4 px under the row then starts at 32, like the boxes under the top
+// bar). The body ends at FOLD_BOTTOM, the white row above the hint band. The
+// portrait panels never fold; gbgfx only takes a fold that makes the page
+// bigger. On the 792x272 bar the ratios come out 0.48 (home), 0.46
+// (inventory, terrain with its tables) and 0.46 (battle), against 0.30
+// unfolded.
+//   home       380: trainer cards and town map end at 368 and 376, party box
+//                   from 384
+//   inventory  564: bag box ends at 560, PC and status boxes from 568
+//   terrain    564: same rows when the encounter or items box is up; without
+//                   them the map window runs to 872 and the page is not folded
+//   battle     356: our mon's lines end by 344, moves box from 360
+const int FOLD_TOP = 28;
+const int FOLD_BOTTOM = HINT_Y - 8;  // 888
+const int HOME_FOLD = 380;
+const int INVENTORY_FOLD = 564;
+const int TERRAIN_FOLD = 564;
+const int BATTLE_FOLD = 356;
 
 // ---------------------------------------------------------------- sections
 
@@ -647,6 +670,7 @@ void drawBadgeBox() {
 }
 
 void viewHome() {
+  gbgfx::setFold(HOME_FOLD, FOLD_TOP, FOLD_BOTTOM);
   drawTopBar("HOME");
   drawTownMap();
   drawTrainerCards();
@@ -658,6 +682,7 @@ void viewHome() {
 // -------------------------------------------------------- view: inventory
 
 void viewInventory() {
+  gbgfx::setFold(INVENTORY_FOLD, FOLD_TOP, FOLD_BOTTOM);
   drawTopBar("INVENTORY");
 
   gbgfx::drawBox(4, 32, 28, 22, 3);
@@ -915,7 +940,6 @@ void drawItemRow(int x, int y, const MapItem &it, int nameCells) {
 }
 
 void viewTerrain() {
-  drawTopBar("TERRAIN");
   uint8_t map = pokemon::curMap();
   MapInfo mi = mapInfo(map);
 
@@ -926,6 +950,9 @@ void viewTerrain() {
   int itemCount = collectItems(map, items, 40);
   bool haveItems = itemCount > 0;
   bool tables = haveWild || haveItems;
+  // The fold depends on the tables, so the top bar waits for it.
+  gbgfx::setFold(tables ? TERRAIN_FOLD : 0, FOLD_TOP, FOLD_BOTTOM);
+  drawTopBar("TERRAIN");
 
   const int winCols = 10;
   const int winRows = tables ? 8 : 13;
@@ -1155,6 +1182,7 @@ void drawPartyStrip() {
 }
 
 void viewBattle() {
+  gbgfx::setFold(BATTLE_FOLD, FOLD_TOP, FOLD_BOTTOM);
   drawTopBar("BATTLE");
   BattleMon enemy, mine;
   bool haveEnemy = pokemon::enemyBattleMon(enemy);
@@ -1288,6 +1316,7 @@ void viewBattle() {
 // ----------------------------------------------------------------- no pack
 
 void viewNoPack() {
+  gbgfx::setFold(0, FOLD_TOP, FOLD_BOTTOM);
   ui::gfx().fillScreen(ui::INK_WHITE);
   gbgfx::printGb(TEXT_MARGIN_X, 420,
                  "pokered.pack missing, upload it on the games page", 2, false);

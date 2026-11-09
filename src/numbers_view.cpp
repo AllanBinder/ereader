@@ -22,13 +22,33 @@ namespace {
 // Anything derived from SCREEN_W or ui::GRID_BOTTOM is a function, not a file
 // scope const: those are globals filled by panel::applyGeometry() at boot, so
 // a const copied from them at static init would freeze at panel 0's values.
+//
+// Short canvas (ui::SHORT_CANVAS, the 792x272 bar with 248 px of content):
+// five 42 px digits stacked in five rows cannot fit, so the same ten cards
+// are laid out the other way round, SHORT_COLS x SHORT_ROWS, under the thin
+// 28 px band (title in helvB14, window in 7x14). Headline baseline 28 + 24 =
+// 52, grid from 28 + 36 = 64 to 232: two rows of (232 - 64 - 12) / 2 = 78 px,
+// five columns of (760 - 4*12) / 5 = 142 px. The card is the STRIP layout
+// below, which has no room for the fub42 digits.
 const int ROWS = 5;
 const int MAX_TILES = ui::GRID_COLS * ROWS;  // 10, the feed's own cap
+const int SHORT_COLS = 5;
+const int SHORT_ROWS = 2;                    // SHORT_COLS * SHORT_ROWS = MAX_TILES
 const int NAME_BASELINE_Y = 33;              // helvB24 in the 44 px band
-const int HEADLINE_BASELINE_Y = ui::HEADER_H + 36;  // 80
-const int GRID_TOP = ui::HEADER_H + 56;             // 100
+const int NAME_SHORT_BASELINE_Y = 20;        // helvB14 in the 28 px band
+// 80 and 100 under the full band.
+int headlineBaselineY() { return ui::headerH() + (ui::SHORT_CANVAS ? 24 : 36); }
+int gridTop() { return ui::headerH() + (ui::SHORT_CANVAS ? 36 : 56); }
+int gridCols() { return ui::SHORT_CANVAS ? SHORT_COLS : ui::GRID_COLS; }
+int gridRows() { return ui::SHORT_CANVAS ? SHORT_ROWS : ROWS; }
+int tileW() {
+  if (!ui::SHORT_CANVAS) return ui::TILE_W;
+  return (SCREEN_W - 2 * TEXT_MARGIN_X - ui::GRID_GUTTER * (SHORT_COLS - 1)) /
+         SHORT_COLS;
+}
 int tileH() {
-  return (ui::GRID_BOTTOM - GRID_TOP - ui::GRID_GUTTER * (ROWS - 1)) / ROWS;
+  const int rows = gridRows();
+  return (ui::GRID_BOTTOM - gridTop() - ui::GRID_GUTTER * (rows - 1)) / rows;
 }
 
 // Inside a tile, from its top edge. Two sets: the roomy one the mock was
@@ -39,16 +59,23 @@ int tileH() {
 //   Compact (panel 1's 122 and 117): label 32 (to 36), accent 42..44, digits
 //   50..92, foot 108 (cap top ~98, descender ~111), 6 px clear of the frame
 //   at the bottom of the 117 px ads tile.
+//   Strip (a short canvas, 78 px project and ads cards): the label in 7x14
+//   bold so a 14 character label fits the 114 px between the pads, baseline
+//   18 (caps from 8), accent 24..26, value in helvB24 (no fub42) baseline 52
+//   (caps from 28), foot 70 (caps from 60, descender to 73).
 struct TileLayout {
-  int label;   // profont22 baseline
+  int label;   // profont22 baseline (7x14 bold on the strip)
   int accent;  // 2 px hairline, clear of the label descenders
-  int value;   // fub42 digits are 42 px tall
+  int value;   // fub42 digits are 42 px tall (helvB24 on the strip)
   int foot;    // 7x14 avg and delta
+  bool strip;  // the short canvas form: small label, no fub42
 };
-const TileLayout ROOMY_TILE = {36, 50, 104, 128};
-const TileLayout COMPACT_TILE = {32, 42, 92, 108};
+const TileLayout ROOMY_TILE = {36, 50, 104, 128, false};
+const TileLayout COMPACT_TILE = {32, 42, 92, 108, false};
+const TileLayout STRIP_TILE = {18, 24, 52, 70, true};
 const int ROOMY_TILE_MIN_H = 141;
 const TileLayout &tileLayout(int h) {
+  if (ui::SHORT_CANVAS) return STRIP_TILE;
   return h >= ROOMY_TILE_MIN_H ? ROOMY_TILE : COMPACT_TILE;
 }
 
@@ -56,22 +83,38 @@ const TileLayout &tileLayout(int h) {
 // the grid, so the grid starts lower and the tile loses a few pixels:
 // (880 - 124 - 48) / 5 = 141 on panel 0 (roomy layout, deepest baseline 128),
 // (760 - 124 - 48) / 5 = 117 on panel 1 (compact layout, deepest 108).
+//
+// On a short canvas the ads screen turns the same way as the project grid: a
+// row per channel and a column per metric, so Spend still sits beside Spend,
+// one above the other. The channel names take a column of their own at the
+// left (ADS_SHORT_NAME_W, 7x14 bold, up to three wrapped lines) and the five
+// metric cards share the rest: (760 - 100 - 12 - 4*12) / 5 = 120 px wide, on
+// the project grid's rows (64 and 154, 78 px tall).
 const int ADS_CHAN_BASELINE_Y = ui::HEADER_H + 72;  // 116, profont22
 const int ADS_GRID_TOP = ui::HEADER_H + 80;         // 124
+const int ADS_SHORT_NAME_W = 100;
 int adsTileH() {
+  if (ui::SHORT_CANVAS) return tileH();
   return (ui::GRID_BOTTOM - ADS_GRID_TOP - ui::GRID_GUTTER * (ROWS - 1)) / ROWS;
+}
+int adsShortTileW() {
+  return (SCREEN_W - 2 * TEXT_MARGIN_X - ADS_SHORT_NAME_W -
+          ui::GRID_GUTTER * SHORT_COLS) /
+         SHORT_COLS;
 }
 
 // Notes screen: one line per note in the body font, below the headline.
-const int NOTES_FIRST_BASELINE = GRID_TOP + 30;
+// 130 on the portrait panels, 94 on a short canvas.
+int notesFirstBaseline() { return gridTop() + 30; }
 const int NOTES_PITCH = 32;
 
 // Chart window. The plot sits between a value column on the left and the
-// right margin, with the date ticks under it. A dot is DOT px square.
+// right margin, with the date ticks under it. A dot is DOT px square. On the
+// short canvas the plot runs from 76 to 188 with the ticks at 218.
 const int CHART_LEFT = TEXT_MARGIN_X + 92;      // room for "12,345,678"
-int chartRight() { return SCREEN_W - TEXT_MARGIN_X - 8; }  // 656 | 456
-const int CHART_TOP = GRID_TOP + 12;            // 112
-int chartBottom() { return ui::GRID_BOTTOM - 44; }  // 836 | 716, ticks below
+int chartRight() { return SCREEN_W - TEXT_MARGIN_X - 8; }  // 656 | 456 | 768
+int chartTop() { return gridTop() + 12; }       // 112 | 112 | 76
+int chartBottom() { return ui::GRID_BOTTOM - 44; }  // 836 | 716 | 188
 const int DOT = 5;
 
 // A JSON body larger than this is not a numbers feed. The real one is a few
@@ -174,14 +217,16 @@ int clampWindow(const numbers_view::Data &d, int window) {
 
 void drawHeader(const String &name, const String &right) {
   Adafruit_GFX &g = ui::gfx();
-  g.fillRect(0, 0, SCREEN_W, ui::HEADER_H, ui::INK_BLACK);
+  g.fillRect(0, 0, SCREEN_W, ui::headerH(), ui::INK_BLACK);
   ui::setInk(true);
   ui::setFont(ui::Font::STATUS);
   int rw = ui::textWidth(right);
-  ui::printAt(SCREEN_W - TEXT_MARGIN_X - rw, ui::HEADER_BASELINE_Y, right);
-  ui::setFont(ui::Font::LABEL);
+  ui::printAt(SCREEN_W - TEXT_MARGIN_X - rw, ui::headerBaselineY(), right);
+  ui::setFont(ui::SHORT_CANVAS ? ui::Font::CAPTION : ui::Font::LABEL);
   int nameW = SCREEN_W - 2 * TEXT_MARGIN_X - rw - 24;
-  ui::printAt(TEXT_MARGIN_X, NAME_BASELINE_Y, ui::fitText(name, nameW));
+  ui::printAt(TEXT_MARGIN_X,
+              ui::SHORT_CANVAS ? NAME_SHORT_BASELINE_Y : NAME_BASELINE_Y,
+              ui::fitText(name, nameW));
   ui::setInk(false);
 }
 
@@ -189,8 +234,11 @@ void drawHeader(const String &name, const String &right) {
 // symbol (the "$" of "$41.20") and any trailing letters (the "M" of
 // "123.5M") in helvB24 on the same baseline, since the numeric font has
 // neither. Falls back to helvB24 for the whole string when even that is too
-// wide or the value is not a number at all.
-void drawValue(int x, int baselineY, const String &value, int maxW) {
+// wide or the value is not a number at all. `numFont` false (the strip card)
+// skips fub42 and starts at helvB24, stepping down to helvB14 when that is
+// too wide.
+void drawValue(int x, int baselineY, const String &value, int maxW,
+               bool numFont = true) {
   const int len = (int)value.length();
   int start = 0;
   while (start < len && !numGlyph(value[start])) start++;
@@ -200,7 +248,7 @@ void drawValue(int x, int baselineY, const String &value, int maxW) {
   String digits = value.substring(start, split);
   String suffix = value.substring(split);
 
-  bool big = digits.length() > 0;
+  bool big = numFont && digits.length() > 0;
   int prefixW = 0;
   int digitsW = 0;
   int w = 0;
@@ -228,25 +276,29 @@ void drawValue(int x, int baselineY, const String &value, int maxW) {
     return;
   }
   ui::setFont(ui::Font::LABEL);
+  if (!numFont && ui::textWidth(value) > maxW) ui::setFont(ui::Font::CAPTION);
   ui::printAt(x, baselineY, ui::fitText(value, maxW));
 }
 
 // One metric card. `h` is the tile height, which the project grid and the
 // slightly shorter ads grid set differently; everything inside is placed from
 // the tile's top edge, so only the frame cares.
-void drawTile(int x, int y, const numbers_view::Metric &m, int w, int h) {
+// `tw` is the card width: ui::TILE_W on the portrait grids, narrower on a
+// short canvas.
+void drawTile(int x, int y, const numbers_view::Metric &m, int w, int tw,
+              int h) {
   Adafruit_GFX &g = ui::gfx();
-  g.drawRect(x, y, ui::TILE_W, h, ui::INK_BLACK);
+  g.drawRect(x, y, tw, h, ui::INK_BLACK);
   const TileLayout &L = tileLayout(h);
-  const int textW = ui::TILE_W - 2 * ui::TILE_PAD;
+  const int textW = tw - 2 * ui::TILE_PAD;
   const int left = x + ui::TILE_PAD;
 
-  ui::setFont(ui::Font::BODY);
+  ui::setFont(L.strip ? ui::Font::STATUS_BOLD : ui::Font::BODY);
   ui::printAt(left, y + L.label, ui::fitText(m.label, textW));
   g.fillRect(left, y + L.accent, ui::TILE_ACCENT_W, 2, ui::INK_BLACK);
 
   drawValue(left, y + L.value, m.value[w].length() ? m.value[w] : String("-"),
-            textW);
+            textW, !L.strip);
 
   // Foot line left, delta right; the foot gives way to the delta when the
   // two would collide.
@@ -254,8 +306,7 @@ void drawTile(int x, int y, const numbers_view::Metric &m, int w, int h) {
   if (m.delta[w].length()) {
     ui::setFont(ui::Font::STATUS_BOLD);
     deltaW = ui::textWidth(m.delta[w]);
-    ui::printAt(x + ui::TILE_W - ui::TILE_PAD - deltaW, y + L.foot,
-                m.delta[w]);
+    ui::printAt(x + tw - ui::TILE_PAD - deltaW, y + L.foot, m.delta[w]);
   }
   if (m.foot[w].length()) {
     ui::setFont(ui::Font::STATUS);
@@ -267,17 +318,44 @@ void drawTile(int x, int y, const numbers_view::Metric &m, int w, int h) {
 void drawProject(const numbers_view::Project &p, const String &right, int w) {
   drawHeader(p.name, right);
   ui::setFont(ui::Font::BODY);
-  ui::printAt(TEXT_MARGIN_X, HEADLINE_BASELINE_Y,
+  ui::printAt(TEXT_MARGIN_X, headlineBaselineY(),
               ui::fitText(p.headline[w], SCREEN_W - 2 * TEXT_MARGIN_X));
   const int th = tileH();
+  const int tw = tileW();
+  const int cols = gridCols();
   int n = (int)p.metrics.size();
   if (n > MAX_TILES) n = MAX_TILES;
   for (int i = 0; i < n; i++) {
-    int r = i / ui::GRID_COLS;
-    int c = i % ui::GRID_COLS;
-    int x = TEXT_MARGIN_X + c * (ui::TILE_W + ui::GRID_GUTTER);
-    int y = GRID_TOP + r * (th + ui::GRID_GUTTER);
-    drawTile(x, y, p.metrics[i], w, th);
+    int r = i / cols;
+    int c = i % cols;
+    int x = TEXT_MARGIN_X + c * (tw + ui::GRID_GUTTER);
+    int y = gridTop() + r * (th + ui::GRID_GUTTER);
+    drawTile(x, y, p.metrics[i], w, tw, th);
+  }
+}
+
+// The ads screen on a short canvas: a row per channel, its name in the
+// column at the left, then its metrics left to right. See ADS_SHORT_NAME_W.
+void drawAdsShort(const numbers_view::Ads &ads, int w) {
+  const int th = adsTileH();
+  const int tw = adsShortTileW();
+  int rows = (int)ads.channels.size();
+  if (rows > SHORT_ROWS) rows = SHORT_ROWS;
+  for (int r = 0; r < rows; r++) {
+    const numbers_view::Channel &ch = ads.channels[r];
+    const int y = gridTop() + r * (th + ui::GRID_GUTTER);
+    ui::setFont(ui::Font::STATUS_BOLD);
+    std::vector<String> name = ui::wrapText(ch.name, ADS_SHORT_NAME_W, 3);
+    for (size_t k = 0; k < name.size(); k++) {
+      ui::printAt(TEXT_MARGIN_X, y + 18 + 16 * (int)k, name[k]);
+    }
+    int n = (int)ch.metrics.size();
+    if (n > SHORT_COLS) n = SHORT_COLS;
+    for (int i = 0; i < n; i++) {
+      int x = TEXT_MARGIN_X + ADS_SHORT_NAME_W + ui::GRID_GUTTER +
+              i * (tw + ui::GRID_GUTTER);
+      drawTile(x, y, ch.metrics[i], w, tw, th);
+    }
   }
 }
 
@@ -286,8 +364,12 @@ void drawProject(const numbers_view::Project &p, const String &right, int w) {
 void drawAds(const numbers_view::Ads &ads, const String &right, int w) {
   drawHeader(ads.name, right);
   ui::setFont(ui::Font::BODY);
-  ui::printAt(TEXT_MARGIN_X, HEADLINE_BASELINE_Y,
+  ui::printAt(TEXT_MARGIN_X, headlineBaselineY(),
               ui::fitText(ads.headline[w], SCREEN_W - 2 * TEXT_MARGIN_X));
+  if (ui::SHORT_CANVAS) {
+    drawAdsShort(ads, w);
+    return;
+  }
   const int th = adsTileH();
   int cols = (int)ads.channels.size();
   if (cols > ui::GRID_COLS) cols = ui::GRID_COLS;
@@ -301,7 +383,7 @@ void drawAds(const numbers_view::Ads &ads, const String &right, int w) {
     if (n > ROWS) n = ROWS;
     for (int i = 0; i < n; i++) {
       int y = ADS_GRID_TOP + i * (th + ui::GRID_GUTTER);
-      drawTile(x, y, ch.metrics[i], w, th);
+      drawTile(x, y, ch.metrics[i], w, ui::TILE_W, th);
     }
   }
 }
@@ -309,15 +391,18 @@ void drawAds(const numbers_view::Ads &ads, const String &right, int w) {
 void drawNotes(const numbers_view::Data &d, const String &right) {
   drawHeader("Sync notes", right);
   ui::setFont(ui::Font::BODY);
-  ui::printAt(TEXT_MARGIN_X, HEADLINE_BASELINE_Y,
+  ui::printAt(TEXT_MARGIN_X, headlineBaselineY(),
               "Collectors that did not report.");
-  int y = NOTES_FIRST_BASELINE;
+  int y = notesFirstBaseline();
   for (size_t i = 0; i < d.notes.size() && y < ui::GRID_BOTTOM; i++) {
     ui::printAt(TEXT_MARGIN_X + ui::TILE_PAD, y,
                 ui::fitText(d.notes[i], SCREEN_W - 2 * TEXT_MARGIN_X - ui::TILE_PAD));
     y += NOTES_PITCH;
   }
   y += 16;
+  // Never under the status rule: on a short canvas the notes can run to the
+  // grid bottom, and the stamp then sits just above the rule.
+  if (y > STATUS_RULE_Y - 6) y = STATUS_RULE_Y - 6;
   ui::setFont(ui::Font::STATUS);
   ui::printAt(TEXT_MARGIN_X + ui::TILE_PAD, y,
               "generated " + d.generated + " ICT");
@@ -333,6 +418,7 @@ void drawChart(const numbers_view::Data &d, const numbers_view::Metric &m) {
   const int CHART_RIGHT = chartRight();
   const int CHART_BOTTOM = chartBottom();
   const int TICK_BASELINE = CHART_BOTTOM + 30;
+  const int CHART_TOP = chartTop();
   const int plotW = CHART_RIGHT - CHART_LEFT;
   const int plotH = CHART_BOTTOM - CHART_TOP;
 
@@ -437,7 +523,7 @@ void drawFooter(const String &left, const String &extra, const String &hint,
 void drawEmpty(const String &right) {
   drawHeader("Daily numbers", right);
   ui::setFont(ui::Font::BODY);
-  ui::printAt(TEXT_MARGIN_X, HEADLINE_BASELINE_Y, "No data in the last week.");
+  ui::printAt(TEXT_MARGIN_X, headlineBaselineY(), "No data in the last week.");
 }
 
 }  // namespace
@@ -661,13 +747,13 @@ void renderChart(const Data &data, int index, int metric, bool forceFull) {
       ui::setFont(ui::Font::BODY);
       String line = chartTitle;
       if (m->value[0].length()) line += "   " + m->value[0] + " yesterday";
-      ui::printAt(TEXT_MARGIN_X, HEADLINE_BASELINE_Y,
+      ui::printAt(TEXT_MARGIN_X, headlineBaselineY(),
                   ui::fitText(line, SCREEN_W - 2 * TEXT_MARGIN_X));
       drawChart(data, *m);
     } else if (onProject || onAds) {
       drawHeader(bandName, right);
       ui::setFont(ui::Font::BODY);
-      ui::printAt(TEXT_MARGIN_X, HEADLINE_BASELINE_Y, "No metrics to chart.");
+      ui::printAt(TEXT_MARGIN_X, headlineBaselineY(), "No metrics to chart.");
     } else if (!data.notes.empty()) {
       drawNotes(data, right);
     } else {

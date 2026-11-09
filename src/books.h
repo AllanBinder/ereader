@@ -79,6 +79,7 @@ struct BookEntry {
   uint8_t variantCount = 1;
   uint32_t fileBytes = 0;     // size of the .pgs on the filesystem
   bool needsReformat = false;  // made for another panel, see books::reformat
+  bool onCard = false;         // a microSD card book (src/sd_card.*)
 };
 
 class Book {
@@ -152,7 +153,26 @@ class Book {
 namespace books {
 
 // Lists every /books/*.pgs, reading title, page count, and saved position.
+// LittleFS only: this is what the books and games server shows and deletes.
 std::vector<BookEntry> list();
+
+// list() followed by the microSD card books (sd_card::list(), empty with no
+// card). The reader's library.
+std::vector<BookEntry> listAll();
+
+// True for a card book's slug (CARD_SLUG_PREFIX, config.h). Its .pgs and .pos
+// live on the card (sd_card::bookPath / posPath); Book, loadPosition and
+// savePosition route there by slug, and fail quietly with no card mounted.
+bool isCardSlug(const String &slug);
+
+// Book names, shared by the WiFi upload (src/games.cpp) and the card books.
+// slugify: the host converters' slug rule (tools/pdf2book.py slugify).
+// cleanTitle: control characters dropped, spaces folded, cut to
+// BOOK_TITLE_MAX characters. titleFromStem: "alice_in_wonderland" ->
+// "alice in wonderland", cleaned.
+String slugify(const String &stem);
+String cleanTitle(const String &raw);
+String titleFromStem(const String &stem);
 
 // Reading position in /books/<slug>.pos: u32 LE page, then u32 LE variant.
 // A legacy 4 byte file is read as page with variant 0.

@@ -8,15 +8,17 @@ Usage:
 Flags:
     --title "..."   override the book title (only valid with a single input)
     --out DIR       output directory (default data/books)
-    --panel {576,750}
+    --panel {576,579,750}
                     the screen the book is paginated for (default 576, the
-                    5.76 inch Good Display panel; 750 is the Waveshare 7.5
-                    inch V2). A book made for another panel still opens: the
-                    reader re-paginates it on the device the first time.
+                    5.76 inch Good Display panel; 579 is the Good Display
+                    5.79 inch 792x272 bar, 750 the Waveshare 7.5 inch V2). A
+                    book made for another panel still opens: the reader
+                    re-paginates it on the device the first time.
 
 The pagination contract lives in SPEC.md: on the default panel 54 columns by
 37 rows, monospace, on the portrait 680x920 canvas (37x32 on the 480x800
-canvas of the 7.5 inch panel). Every line this script emits fits the grid, so
+canvas of the 7.5 inch panel, 63x10 on the landscape 792x272 canvas of the
+5.79 inch bar). Every line this script emits fits the grid, so
 the firmware can render lines verbatim with no wrapping. The grid is recorded
 in the file (see GRID_EXT_MAGIC), so the reader knows which screen it is for.
 
@@ -72,12 +74,15 @@ GRIDS = {
 COLS, ROWS = GRIDS[0]
 
 # Every panel the firmware supports, keyed by the --panel value, as the
-# portrait canvas (width, height). Mirrors the table in src/panel.cpp (native
-# frame turned on its side). GRIDS above is panel 576, which is also the grid
-# a book with no recorded grid is assumed to have.
+# canvas the UI runs on (width, height). Mirrors the table in src/panel.cpp
+# (panel::canvasW/canvasH): the native frame turned on its side for the
+# portrait panels, the native frame itself for the landscape 5.79 inch bar.
+# GRIDS above is panel 576, which is also the grid a book with no recorded
+# grid is assumed to have.
 PANELS = {
-    576: (680, 920),   # panel 0, Good Display GDEH0576T81
-    750: (480, 800),   # panel 1, Waveshare 7.5 inch V2
+    576: (680, 920),   # panel 0, Good Display GDEH0576T81, portrait
+    750: (480, 800),   # panel 1, Waveshare 7.5 inch V2, portrait
+    579: (792, 272),   # panel 2, Good Display GDEY0579T93, landscape
 }
 DEFAULT_PANEL = 576
 
@@ -96,7 +101,7 @@ def panel_grids(panel):
         cols = (W - 2*MARGIN_X) // advance
         rows = (ruleY - 1 - descent - firstBaseline) // pitch + 1
     with ruleY = H - STATUS_STRIP_H. Panel 576 gives 54x37 and 40x27, panel
-    750 gives 37x32 and 28x24.
+    750 gives 37x32 and 28x24, panel 579 gives 63x10 and 47x7.
     """
     width, height = PANELS[panel]
     rule_y = height - STATUS_STRIP_H
@@ -781,8 +786,8 @@ def main(argv=None):
     parser.add_argument("--out", default=None, help="output directory (default data/books)")
     parser.add_argument(
         "--panel", type=int, choices=sorted(PANELS), default=DEFAULT_PANEL,
-        help="screen to paginate for: 576 (5.76 inch Good Display, default) "
-             "or 750 (Waveshare 7.5 inch V2)")
+        help="screen to paginate for: 576 (5.76 inch Good Display, default), "
+             "579 (5.79 inch Good Display bar) or 750 (Waveshare 7.5 inch V2)")
     args = parser.parse_args(argv)
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

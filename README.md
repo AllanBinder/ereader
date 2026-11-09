@@ -30,6 +30,11 @@ a battery; the build guide above covers the options.
 Case: the laser-cut acrylic and 3D print case files are sent by email when
 you sign up on the [build guide](https://muonsortes.com/build-a-wifi-ereader).
 
+The pocket speed reader (Good Display GDEY0579T93 5.79 inch bar, DESPI-C579
+adapter, ESP32-S3 N16R8) is the same firmware in the `esp32s3_579` env; its
+parts, wiring and case are in its own
+[build guide](https://muonsortes.com/speed-reader).
+
 ## Wiring
 
 This table is `include/pins.h`, which is the single source of truth. Solder
@@ -158,7 +163,22 @@ CENTER pauses. Paused, LEFT plays again, DOWN steps back a sentence or two,
 CENTER goes back to the normal page, which is kept in step with what you speed
 read.
 
-How it gets fast on the GDEH0576T81: SPI at 40 MHz, the partial waveform
+On the wide reader (panel 2) the Speed picker has a third settings tile, Mode:
+Normal (the default) or "Turbo, more wear" (CENTER toggles; stored in NVS as
+`ui`/`rsvpmode`). Normal uses the panel's own partial waveform with keep power,
+single write and lean timing: safe for the glass, top speed 120 / 240 / 360
+wpm at 1 / 2 / 3 words (about 120 measured on glass at 1 word). Turbo loads a
+custom 8 frame waveform with no hold (about 190 ms a flash), top speed
+300 / 600 / 900 wpm, darker blacks and almost no ghosting, and wears the panel
+faster. Its ghost clear runs sooner (first sentence end after 30 flashes,
+always by 45; Normal 60 and 90) and is mostly a quick black then white blink
+of about 0.4 s instead of the 2.2 s full refresh; a real full still runs on
+entry and about every 10 minutes. Changing mode clamps the
+speed to the new top speed. If the panel cannot keep up with the set speed,
+the HUD shows the real rate it is achieving (for example `REAL 412`)
+next to the set one. Panels 0 and 1 have no Mode tile.
+
+How it gets fast on the GDEH0576T81 (panel 0, unchanged by the modes above): SPI at 40 MHz, the partial waveform
 picked for a forced 40 C (the shortest the panel stores, 367 ms), and a
 waveform cut. When a flash has to come faster than that waveform allows, the
 driver resets the panel controller 60 ms into the refresh, which stops the
@@ -215,6 +235,17 @@ pio run -e esp32s3 -t upload        # build and flash the firmware only
 pio run -e esp32s3 -t uploadfs      # replace the filesystem with data/ (wipes books, ROMs, saves)
 pio device monitor                  # log over USB
 ```
+
+The wide reader (GDEY0579T93 bar on an ESP32-S3 N16R8, jumper wired to the
+`PINS_WIDE` map in `include/pins.h`) has its own env, `esp32s3_579`: octal
+PSRAM, 16 MB flash with `partitions_16mb.csv`, and panel 2 as the default for
+a board with empty NVS. Use `-e esp32s3_579` in the commands above. Panel 2
+always runs the custom fast driver (`GxEPD2_579_Fast`) in this env.
+`esp32s3_579_fast` is a thin alias of it (the build guide and installer README
+name it), and `esp32s3_579_founder` is the founder's own unit (adds
+`FOUNDER_UNIT=1` pin remaps). A fresh
+board needs the `uploadfs` once: the firmware does not format an empty
+filesystem, so without it there are no books and nowhere to upload them.
 
 `-t upload` writes the app only and never touches books, saves or WiFi
 settings. The web page the reader serves is gzipped into the app image from
@@ -290,17 +321,23 @@ avoided because it is dead on the original unit.
 
 **Supported panels and runtime selection.** One firmware image supports a
 small table of panels (`src/panel.h/.cpp`): id 0 is the Good Display
-GDEH0576T81 (5.76 inch, 920x680, DESPI-C02, custom fast driver) and id 1 is
-the Waveshare 7.5 inch V2 (800x480, UC8179, `GxEPD2_750_T7`). The choice is
-stored in NVS (namespace `ui`, key `panel`); a missing key means panel 0, so
-existing readers need no action. Use the **Screen** menu item to switch (it
+GDEH0576T81 (5.76 inch, 920x680, DESPI-C02, custom fast driver), id 1 is
+the Waveshare 7.5 inch V2 (800x480, UC8179, `GxEPD2_750_T7`) and id 2 is the
+Good Display GDEY0579T93 (5.79 inch, 792x272 bar, two SSD1683s in cascade,
+DESPI-C579 adapter, custom `GxEPD2_579_Fast` driver, always). Panels 0 and 1 run the UI
+portrait; panel 2 runs it landscape, 792 wide by 272 tall (text grids 63x10
+and 47x7, a three column menu, a 5 x 2 numbers grid). The choice is
+stored in NVS (namespace `ui`, key `panel`); a missing key means panel 0
+(panel 2 in the `esp32s3_579` env), so existing readers need no action. Use the **Screen** menu item to switch (it
 reboots). If the screen is blank (wrong panel, or a 7.5 inch build on first
 boot), hold the center button while pressing reset or plugging in: the reader
 cycles through the panels, drawing "Press center if you can read this" on each
 for about 8 seconds, and center saves the one you can read. Let go of center
 once the first picker screen appears; a press only counts after a release. Wiring is the same
 for both panels; on Waveshare HAT rev 2.3 or later tie the PWR pin to 3.3 V.
-Speed read is supported on the 5.76 inch panel only for now. Geometry (screen
+Speed read is supported on the 5.76 inch panel (waveform cut) and on the
+5.79 inch bar (Normal and Turbo modes, see Speed read above); not on the
+7.5 inch panel. Geometry (screen
 size, content area, text grids) is computed at boot for the active panel. A
 panel not in the table needs a code change: add an entry to the table.
 
@@ -595,9 +632,9 @@ count, u16 title length and the title, then per variant a u8 font id, a u32
 page count and a page table of `{u32 offset, u32 length, u32 anchor}` entries,
 then the blob region. Anchors map a reading position from one text size to the
 other. `tools/txt2book.py --dual` writes this, and so does a news sync.
-Both `tools/pdf2book.py` and `tools/txt2book.py` take `--panel 576` or
-`--panel 750` to paginate for a specific panel; the default is 576 (the
-5.76 inch panel). The
+Both `tools/pdf2book.py` and `tools/txt2book.py` take `--panel 576`,
+`--panel 579` or `--panel 750` to paginate for a specific panel; the default
+is 576 (the 5.76 inch panel). The
 full field by field description is in SPEC.md.
 
 **`/books/<slug>.pos`.** A u32 little-endian page index (0 based), rewritten on

@@ -25,13 +25,31 @@
 // panel (480x800) the ratio is 480/680, about 0.71: the page is 480x649, a
 // scale 2 Gen 1 cell is about 11 px (2.3 mm at that panel's 124 dpi, against
 // 2.0 mm on panel 0), and strokes come out 1 or 2 px wide.
+//
+// Fold. A wide, short canvas (the 792x272 bar, panel 2) would shrink the
+// whole page to 272/920, about 0.30, a 5 px Gen 1 cell. setFold() instead
+// cuts the page body at a design row between two boxes and sets the lower
+// part beside the upper one, as a second column: the page is then two
+// designW columns 16 design px apart, as tall as the taller column plus the
+// bars. On the bar that is about 0.46, a 7 to 8 px cell, the Game Boy's own
+// 8 px font at roughly one panel pixel per GB pixel. The fold is only taken
+// when its ratio beats the unfolded one, so the portrait panels never fold.
+// A rectangle goes to the column its top edge is in, so a fold row must not
+// cut through anything drawn.
 
 namespace gbgfx {
 
 // Fits a designW x designH page onto the active canvas (SCREEN_W/SCREEN_H at
-// the time of the call). Call before drawing a frame.
+// the time of the call). Call before drawing a frame. Clears any fold.
 void setLayout(int designW, int designH);
-// Design x / y to a panel x / y.
+// Folds the page set by setLayout() at design row `foldY` (0 = no fold): rows
+// foldY to bodyBottom go to a second column, moved up so foldY lands on
+// bodyTop; rows from bodyBottom down (the hint band) follow under the taller
+// column, full width as before. Recomputes the map, so call it before the
+// first draw of a frame, and again per view: each view has its own fold row.
+void setFold(int foldY, int bodyTop, int bodyBottom);
+// Design x / y to a panel x / y. mapX is the left column's; mapY knows which
+// part of a folded page `y` is in.
 int mapX(int x);
 int mapY(int y);
 // Height in panel pixels of the scaled design page.
