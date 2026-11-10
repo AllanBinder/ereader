@@ -88,14 +88,14 @@ extra 8 MB just goes unused). It does not fit a 4 MB board.
 The reader opens *Alice's Adventures in Wonderland*, which comes with the
 install, so you can check the panel and the buttons straight away. If the
 picture is upside down for the way you hold it, press center for the menu and
-pick **Flip screen**: it turns the picture 180 degrees and turns the buttons
+pick **WiFi and settings**, then **Flip screen**: it turns the picture 180 degrees and turns the buttons
 with it, so up is still up. The choice is kept across power cycles and
 firmware updates (an install from the web page, which erases the board,
 resets it).
 
 ## Set up WiFi from a phone
 
-1. Press center for the menu and pick **WiFi setup**.
+1. Press center for the menu, pick **WiFi and settings**, then **WiFi setup**.
 2. On your phone, join the WiFi network **ereader-setup** (no password). Most
    phones then open the setup page by themselves; if not, open
    `http://192.168.4.1`.
@@ -103,13 +103,14 @@ resets it).
    it and says whether it worked, on the page and on the panel.
 4. Press center on the reader to finish.
 
-Up to eight networks are remembered. **Check WiFi** in the menu tests every
+Up to eight networks are remembered. **Check WiFi** (also under WiFi and settings) tests every
 stored network and tells you which ones work. You can skip this step
 entirely: adding books also works through the reader's own WiFi.
 
 ## Add books from a phone
 
-1. Press center for the menu and pick **Books and games (WiFi)**. The panel
+1. Press center for the menu, pick **WiFi and settings**, then **Books and
+   games (WiFi)**. The panel
    shows the addresses to open:
    - on your home WiFi: `http://ereader.local/` or the `http://192.168.x.x/`
      address it shows;
@@ -124,7 +125,7 @@ entirely: adding books also works through the reader's own WiFi.
 3. Delete a book with its Delete button (tap twice). The page shows how much
    space is left, and refuses a book that would not fit before sending it.
 4. Press center on the reader when you are done (it also stops by itself
-   after 15 minutes with the page closed). The new books are in the menu.
+   after 15 minutes with the page closed). The new books are under Books.
 
 Free public domain books in plain text: [Project Gutenberg](https://www.gutenberg.org)
 (pick "Plain Text UTF-8").
@@ -148,22 +149,39 @@ Menu (a grid of tiles, two columns):
 
 - DOWN: next row. UP: previous row.
 - LEFT: next column. RIGHT: previous column.
-- CENTER: pick. Leave the menu with the Resume tile.
+- CENTER: pick. Leave the main menu with the Resume tile, and a submenu with
+  its Back tile (Main menu on WiFi and settings).
 
-Menu items: Resume, Speed read, one tile per book, Text size (Normal or Large, for books
-that have both), WiFi setup, Check WiFi, Books and games (WiFi), Jump to
-page, Flip screen, Button test.
+The menu is a main page with submenus:
 
-Speed read: pick a book and it flashes one, two or three words at a time on
-the landscape screen, from the page you are on in that book (two words at 250
-words a minute to start). The picker ends with two settings tiles: Words
-(1, 2 or 3 per flash) and Speed (+25 wpm a press, wrapping back to 100). While
-it plays, LEFT is faster and DOWN is slower (25 wpm a press, remembered),
-CENTER pauses. Paused, LEFT plays again, DOWN steps back a sentence or two,
-CENTER goes back to the normal page, which is kept in step with what you speed
-read.
+- **Resume**: back to what you did last, the page view or speed read (the
+  tile says "speed read, ..." when it will speed read). Remembered across
+  power cycles.
+- **Books**: **Normal reading** (one tile per book, Text size for books that
+  have Normal and Large, Jump to page) and **Speed reading** (below). On a
+  panel without speed read, Books goes straight to the book list.
+- **WiFi and settings**: WiFi setup, Check WiFi, Books and games (WiFi), Flip
+  screen, Screen, Button test, and Sound test on a build with the headphones
+  module.
 
-On the wide reader (panel 2) the Speed picker has a third settings tile, Mode:
+Speed reading opens its options before anything flashes: **Start** (the open
+book), **Book** (pick another, then back to Start), **Words** (1, 2 or 3 per
+flash), **Speed** (+25 wpm a press, wrapping back to 100) and, on the wide
+reader, **Mode**. It flashes one, two or three words at a time on the
+landscape screen, from the page you are on in that book (two words at 250
+words a minute to start). While it plays on the 5.76 inch reader, LEFT is
+faster and DOWN is slower (25 wpm a press, remembered), CENTER pauses.
+Paused, LEFT plays again, DOWN steps back a sentence or two, CENTER goes back
+to the normal page, which is kept in step with what you speed read.
+
+On the wide reader: UP faster, DOWN slower, RIGHT cycles words per flash,
+CENTER plays or pauses and a quick second CENTER goes back to the page. Hold
+the right shoulder key to read and let go to pause; the left shoulder key
+steps back 20 words (`RSVP_KEY_BACK_WORDS`), playing or paused. A pause
+redraws only the header (no full refresh), and in Turbo the next play starts
+with the quick soft clear so the first words come up without negative ghosts.
+
+On the wide reader (panel 2) the speed options have a Mode tile:
 Normal (the default) or "Turbo, more wear" (CENTER toggles; stored in NVS as
 `ui`/`rsvpmode`). Normal uses the panel's own partial waveform with keep power,
 single write and lean timing: safe for the glass, top speed 120 / 240 / 360

@@ -39,7 +39,6 @@ enum class AppState {
   JUMP,
   EMPTY,
   NUMBERS,
-  SPEED_PICK,
   SPEED_READ,
   SCREEN_PICK,
 };
@@ -55,9 +54,6 @@ uint32_t currentPage = 0;
 
 int menuCursor = 0;
 uint32_t jumpTarget = 1;
-
-// Cursor in the speed read book picker (one tile per library book).
-int speedCursor = 0;
 
 // Cursor in the "Screen" list (one tile per supported panel, then Back).
 int screenCursor = 0;
@@ -375,10 +371,31 @@ void reloadLibraryAfterServer() {
 // The menu is built as a list of rows carrying what to do, not just a label:
 // the book list is variable length and the text size row only exists for a
 // book with more than one variant, so hard coded indices do not survive.
+//
+// Layout (2026-11-10): a short main page and submenus under it.
+//   Main: Resume (the last thing done, reading or speed read), Books,
+//         the feed tiles where configured, WiFi and settings.
+//   Books: Normal reading, Speed reading. On glass without speed read the
+//         Books tile goes straight to Normal reading.
+//   Normal reading: one tile per book, Text size, Jump to page.
+//   Speed reading: the options first (Start, Book, Words, Speed, Mode), so
+//         the pace is set before the first flash. Book opens a book list.
+//   WiFi and settings: WiFi, downloads, feeds, screen, and the tests.
+// The pad has no back button, so every submenu ends with a Back tile.
 enum class MenuAction {
   RESUME,
-  SPEED_READ,
+  BOOKS,
+  READ_MENU,
+  SPEED_MENU,
+  SETTINGS,
+  BACK,
   OPEN_BOOK,
+  SPEED_START,
+  SPEED_BOOK,
+  SPEED_PICK_BOOK,
+  SPEED_WORDS,
+  SPEED_WPM,
+  SPEED_MODE,
   NUMBERS,
   TEXT_SIZE,
   SYNC_NEWS,
@@ -393,6 +410,17 @@ enum class MenuAction {
   SOUND_TEST,
 };
 
+enum class MenuPage {
+  MAIN,
+  BOOKS,
+  READ,
+  SPEED,
+  SPEED_BOOK,
+  SETTINGS,
+};
+
+MenuPage menuPage = MenuPage::MAIN;
+
 struct MenuRow {
   String label;
   String sub;     // small state line under the label on the tile, or empty
@@ -405,34 +433,84 @@ struct MenuRow {
       : label(l), sub(s), action(a), bookIndex(idx) {}
 };
 
+// What Resume goes back to: the page view or speed read. Set when the reader
+// chooses one (a book from Normal reading, a page turn, Start in speed read)
+// and kept in NVS so Resume after a power cycle still means the same thing.
+// Leaving speed read lands in the page view but does not count as a choice;
+// turning a page there does.
+enum class LastActivity : uint8_t { READING = 0, SPEED = 1 };
+
+LastActivity lastActivityValue = LastActivity::READING;
+bool lastActivityLoaded = false;
+
+LastActivity lastActivity() {
+  if (!lastActivityLoaded) {
+    lastActivityLoaded = true;
+    Preferences p;
+    if (p.begin(NVS_NS_UI, true)) {
+      uint8_t v = p.getUChar(NVS_KEY_UI_LAST, 0);
+      lastActivityValue = (v == 1) ? LastActivity::SPEED : LastActivity::READING;
+      p.end();
+    }
+  }
+  return lastActivityValue;
+}
+
+void setLastActivity(LastActivity a) {
+  if (lastActivity() == a) return;
+  lastActivityValue = a;
+  Preferences p;
+  if (!p.begin(NVS_NS_UI, false)) return;
+  p.putUChar(NVS_KEY_UI_LAST, (uint8_t)a);
+  p.end();
+}
+
+// Resume restarts speed read only where speed read exists and a book is open.
+bool resumeIsSpeed() {
+  return lastActivity() == LastActivity::SPEED && panel::speedReadSupported() &&
+         book.isOpen();
+}
+
 bool hasTextSizeItem() {
   return book.isOpen() && book.variantCount() > 1;
 }
 
-std::vector<MenuRow> menuRows() {
-  std::vector<MenuRow> rows;
-  // Each row is a tile: a bold label plus a small state line. Book tiles carry
-  // the saved position; action tiles carry their current state where there is
-  // one. The tile renderer cuts anything too wide with "..".
-  rows.push_back(MenuRow("Resume", book.isOpen() ? book.title() : String("no book"),
-                         MenuAction::RESUME, -1));
-  // Speed read is only offered on glass it has been tuned on (the panel
-  // table's speedReadSupported); elsewhere the tile does not exist.
-  if (panel::speedReadSupported()) {
-    // ", turbo" when the panel has speed profiles and Turbo is on.
-    const bool turbo =
-        ui::activeSpeedProfile() && rsvp::mode() == speed::Mode::TURBO;
-    rows.push_back(MenuRow("Speed read", String(rsvp::words()) + " word" +
-                               (rsvp::words() > 1 ? "s" : "") + ", " +
-                               String(rsvp::wpm()) + " wpm" + (turbo ? ", turbo" : ""),
-                           MenuAction::SPEED_READ, -1));
-  }
+// Index of the open book in `library`, or -1.
+int openBookIndex() {
+  if (!book.isOpen()) return -1;
   for (size_t i = 0; i < library.size(); i++) {
-    String pos = "p. " + String((unsigned long)(library[i].savedPage + 1)) +
-                 "/" + String((unsigned long)library[i].pageCount);
-    // A book on the microSD card says so on its tile.
-    if (library[i].onCard) pos = "card, " + pos;
-    rows.push_back(MenuRow(library[i].title, pos, MenuAction::OPEN_BOOK, (int)i));
+    if (library[i].slug == book.slug()) return (int)i;
+  }
+  return -1;
+}
+
+String pageOf(const BookEntry &e) {
+  String pos = "p. " + String((unsigned long)(e.savedPage + 1)) + "/" +
+               String((unsigned long)e.pageCount);
+  // A book on the microSD card says so on its tile.
+  if (e.onCard) pos = "card, " + pos;
+  return pos;
+}
+
+// "2 words, 300 wpm, turbo": the speed read settings in one line.
+String speedSummary() {
+  const bool turbo =
+      ui::activeSpeedProfile() && rsvp::mode() == speed::Mode::TURBO;
+  return String(rsvp::words()) + " word" + (rsvp::words() > 1 ? "s" : "") +
+         ", " + String(rsvp::wpm()) + " wpm" + (turbo ? ", turbo" : "");
+}
+
+void addMainRows(std::vector<MenuRow> &rows) {
+  // Each row is a tile: a bold label plus a small state line. The tile
+  // renderer cuts anything too wide with "..".
+  String resume = book.isOpen() ? book.title() : String("no book");
+  if (resumeIsSpeed()) resume = "speed read, " + book.title();
+  rows.push_back(MenuRow("Resume", resume, MenuAction::RESUME, -1));
+  {
+    size_t n = library.size();
+    rows.push_back(MenuRow("Books",
+                           String((unsigned long)n) + (n == 1 ? " book" : " books"),
+                           MenuAction::BOOKS, -1));
   }
   // The feed tiles only exist in a build with a token for their feed (see
   // FEEDS_CONFIGURED in config.h); a public build has nowhere to sync from.
@@ -442,16 +520,74 @@ std::vector<MenuRow> menuRows() {
                            stamp.length() ? "synced " + stamp : String("never synced"),
                            MenuAction::NUMBERS, -1));
   }
+  {
+    size_t n = wifi_store::list().size();
+    String nets = String((unsigned long)n) + (n == 1 ? " network" : " networks");
+    rows.push_back(MenuRow("WiFi and settings", nets + ", screen, tests",
+                           MenuAction::SETTINGS, -1));
+  }
+}
+
+void addBooksRows(std::vector<MenuRow> &rows) {
+  rows.push_back(MenuRow("Normal reading",
+                         book.isOpen() ? book.title() : String("pick a book"),
+                         MenuAction::READ_MENU, -1));
+  rows.push_back(MenuRow("Speed reading", speedSummary(), MenuAction::SPEED_MENU, -1));
+  rows.push_back(MenuRow("Back", "main menu", MenuAction::BACK, -1));
+}
+
+void addReadRows(std::vector<MenuRow> &rows) {
+  for (size_t i = 0; i < library.size(); i++) {
+    rows.push_back(MenuRow(library[i].title, pageOf(library[i]),
+                           MenuAction::OPEN_BOOK, (int)i));
+  }
   if (hasTextSizeItem()) {
     String size = (book.fontId() == BOOK_FONT_PROFONT29) ? "Large" : "Normal";
     rows.push_back(MenuRow("Text size", size, MenuAction::TEXT_SIZE, -1));
   }
-  if (FEEDS_CONFIGURED) {
-    String stamp = news_sync::lastStamp();
-    rows.push_back(MenuRow("Sync feeds",
-                           stamp.length() ? "synced " + stamp : String("never synced"),
-                           MenuAction::SYNC_NEWS, -1));
+  if (book.isOpen()) {
+    rows.push_back(MenuRow("Jump to page",
+                           "page " + String((unsigned long)(currentPage + 1)) + "/" +
+                               String((unsigned long)book.pageCount()),
+                           MenuAction::JUMP, -1));
   }
+  rows.push_back(MenuRow("Back",
+                         panel::speedReadSupported() ? "books" : "main menu",
+                         MenuAction::BACK, -1));
+}
+
+void addSpeedRows(std::vector<MenuRow> &rows) {
+  rows.push_back(MenuRow("Start",
+                         book.isOpen() ? book.title() : String("pick a book"),
+                         MenuAction::SPEED_START, -1));
+  rows.push_back(MenuRow("Book", book.isOpen() ? book.title() : String("none"),
+                         MenuAction::SPEED_BOOK, -1));
+  rows.push_back(MenuRow("Words", String(rsvp::words()) + " per flash",
+                         MenuAction::SPEED_WORDS, -1));
+  rows.push_back(MenuRow("Speed", String(rsvp::wpm()) + " wpm",
+                         MenuAction::SPEED_WPM, -1));
+  // Normal and Turbo only on a panel with speed profiles.
+  if (ui::activeSpeedProfile()) {
+    rows.push_back(MenuRow("Mode",
+                           rsvp::mode() == speed::Mode::TURBO ? "Turbo, more wear"
+                                                              : "Normal",
+                           MenuAction::SPEED_MODE, -1));
+  }
+  rows.push_back(MenuRow("Back", "books", MenuAction::BACK, -1));
+}
+
+void addSpeedBookRows(std::vector<MenuRow> &rows) {
+  for (size_t i = 0; i < library.size(); i++) {
+    rows.push_back(MenuRow(library[i].title, pageOf(library[i]),
+                           MenuAction::SPEED_PICK_BOOK, (int)i));
+  }
+  rows.push_back(MenuRow("Back", "speed options", MenuAction::BACK, -1));
+}
+
+void addSettingsRows(std::vector<MenuRow> &rows) {
+  // First tile, not last: this page is long enough that a Back at the end
+  // sits below the fold.
+  rows.push_back(MenuRow("Main menu", "back", MenuAction::BACK, -1));
   {
     size_t n = wifi_store::list().size();
     String nets = String((unsigned long)n) + (n == 1 ? " network" : " networks");
@@ -472,15 +608,14 @@ std::vector<MenuRow> menuRows() {
                            MenuAction::GAMES, -1));
   }
   if (FEEDS_CONFIGURED) {
+    String stamp = news_sync::lastStamp();
+    rows.push_back(MenuRow("Sync feeds",
+                           stamp.length() ? "synced " + stamp : String("never synced"),
+                           MenuAction::SYNC_NEWS, -1));
     rows.push_back(MenuRow("Auto sync",
                            news_sync::autoSyncEnabled() ? "on" : "off",
                            MenuAction::AUTO_SYNC, -1));
   }
-  rows.push_back(MenuRow("Jump to page",
-                         book.isOpen() ? "page " + String((unsigned long)(currentPage + 1)) +
-                                             "/" + String((unsigned long)book.pageCount())
-                                       : String(""),
-                         MenuAction::JUMP, -1));
   rows.push_back(MenuRow("Flip screen",
                          input::turned() ? "turned 180" : "as built",
                          MenuAction::FLIP_SCREEN, -1));
@@ -491,9 +626,33 @@ std::vector<MenuRow> menuRows() {
   if (sound_test::fitted()) {
     rows.push_back(MenuRow("Sound test", "both, left, right", MenuAction::SOUND_TEST, -1));
   }
+}
+
+std::vector<MenuRow> menuRows() {
+  std::vector<MenuRow> rows;
+  switch (menuPage) {
+    case MenuPage::MAIN: addMainRows(rows); break;
+    case MenuPage::BOOKS: addBooksRows(rows); break;
+    case MenuPage::READ: addReadRows(rows); break;
+    case MenuPage::SPEED: addSpeedRows(rows); break;
+    case MenuPage::SPEED_BOOK: addSpeedBookRows(rows); break;
+    case MenuPage::SETTINGS: addSettingsRows(rows); break;
+  }
   return rows;
 }
 
+// The main page keeps the sensor header; a submenu shows where it is.
+String menuHeader() {
+  switch (menuPage) {
+    case MenuPage::BOOKS: return "Books";
+    case MenuPage::READ: return "Normal reading";
+    case MenuPage::SPEED: return "Speed reading";
+    case MenuPage::SPEED_BOOK: return "Speed reading: pick a book";
+    case MenuPage::SETTINGS: return "WiFi and settings";
+    case MenuPage::MAIN:
+    default: return sensorHeader();
+  }
+}
 // Rows to tiles for the renderer. The name survives from the one column list
 // so every call site stays as it was.
 std::vector<ui::MenuTile> labelsOf(const std::vector<MenuRow> &rows) {
@@ -522,12 +681,35 @@ void toggleTextSize() {
   renderCurrentPage(true);
 }
 
-void openMenu() {
-  state = AppState::MENU;
-  menuCursor = 0;
-  refreshLibrarySaved();
-  ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
+void renderMenuPage(bool forceFull = false) {
+  ui::renderMenu(menuHeader(), labelsOf(menuRows()), menuCursor, forceFull);
 }
+
+// Index of the first tile on the current page doing `a` (0 if none), for
+// landing the cursor on the tile a submenu was entered from.
+int cursorOf(MenuAction a) {
+  std::vector<MenuRow> rows = menuRows();
+  for (size_t i = 0; i < rows.size(); i++) {
+    if (rows[i].action == a) return (int)i;
+  }
+  return 0;
+}
+
+// Shows `page` with the cursor on the tile doing `at`, or on tile 0.
+void openMenuPage(MenuPage page, int cursor = 0) {
+  state = AppState::MENU;
+  menuPage = page;
+  menuCursor = cursor;
+  refreshLibrarySaved();
+  renderMenuPage();
+}
+
+void openMenuPageAt(MenuPage page, MenuAction at) {
+  menuPage = page;
+  openMenuPage(page, cursorOf(at));
+}
+
+void openMenu() { openMenuPage(MenuPage::MAIN); }
 
 // One frame of the numbers view: the grid in the current window, or the
 // chart when the window index sits one past the feed's windows.
@@ -828,6 +1010,8 @@ void enterJump() {
 }
 
 void handleReading(Button b) {
+  // Any page turn makes the page view what Resume goes back to.
+  if (b != BTN_CENTER) setLastActivity(LastActivity::READING);
   switch (b) {
     // Founder holds the device so LEFT is the natural "forward" tilt. With the
     // portrait UI the page also runs top to bottom, so DOWN reads as "further
@@ -867,7 +1051,7 @@ void handleReading(Button b) {
   }
 }
 
-// Grid navigation, shared by the menu and the speed read book picker. The
+// Grid navigation, shared by the menu pages and the screen picker. The
 // tiles are laid out row major in `cols` columns, so row = cursor / cols and
 // column = cursor % cols. Only DOWN, LEFT (the founder's "right") and CENTER
 // work on this unit; UP and RIGHT are the reverse moves and are never
@@ -917,57 +1101,19 @@ bool moveGridCursor(Button b, int &cursor, int count) {
 
 // ------------------------------------------------------------ speed read
 //
-// Menu tile -> book picker -> RSVP (src/rsvp.*) -> reading view. The picker
-// is the menu grid with one tile per book, each carrying its saved position;
-// picking one opens it exactly as its menu tile would and starts at the first
-// word of the saved page. Picking the book already open starts at the page
-// being read, mid page if speed read was last left on that same page.
-// Two settings tiles follow the books: Words (1/2/3 per flash) and Speed
-// (steps up by RSVP_WPM_STEP, wrapping); CENTER on one changes it in place.
-// A panel with speed profiles (ui::activeSpeedProfile) adds a third, Mode,
-// which toggles Normal and Turbo (rsvp::cycleMode).
+// Books -> Speed reading -> options (Start, Book, Words, Speed, Mode) -> RSVP
+// (src/rsvp.*) -> reading view. Start runs the open book: from the page
+// being read, mid page if speed read was last left on that same page. Book
+// opens a list of the library; picking one opens it and comes back to the
+// options on Start, so the pace can still be checked before the first flash.
 
-// Settings tiles after the books: Words, Speed, and Mode where it exists.
-int speedSettingTiles() { return ui::activeSpeedProfile() ? 3 : 2; }
-
-std::vector<ui::MenuTile> speedTiles() {
-  std::vector<ui::MenuTile> out;
-  for (size_t i = 0; i < library.size(); i++) {
-    out.push_back(ui::MenuTile(
-        library[i].title, "p. " + String((unsigned long)(library[i].savedPage + 1)) +
-                              "/" + String((unsigned long)library[i].pageCount)));
-  }
-  out.push_back(ui::MenuTile("Words", String(rsvp::words()) + " per flash"));
-  out.push_back(ui::MenuTile("Speed", String(rsvp::wpm()) + " wpm"));
-  if (ui::activeSpeedProfile()) {
-    out.push_back(ui::MenuTile(
-        "Mode", rsvp::mode() == speed::Mode::TURBO ? "Turbo, more wear" : "Normal"));
-  }
-  return out;
-}
-
-void openSpeedPicker() {
-  // No speed read on this panel: the menu tile is hidden, so this is only a
+void startSpeedRead(int bookIndex) {
+  // No speed read on this panel: its tiles are hidden, so this is only a
   // guard against any other way in.
   if (!panel::speedReadSupported()) {
     openMenu();
     return;
   }
-  if (library.empty()) {
-    showEmptyLibrary("");
-    return;
-  }
-  state = AppState::SPEED_PICK;
-  refreshLibrarySaved();
-  // Start on the open book: the likeliest pick.
-  speedCursor = 0;
-  for (size_t i = 0; i < library.size(); i++) {
-    if (book.isOpen() && library[i].slug == book.slug()) speedCursor = (int)i;
-  }
-  ui::renderMenu("Speed read", speedTiles(), speedCursor);
-}
-
-void startSpeedRead(int bookIndex) {
   if (bookIndex < 0 || bookIndex >= (int)library.size()) return;
   String slug = library[bookIndex].slug;
   uint16_t word = 0;
@@ -977,6 +1123,7 @@ void startSpeedRead(int bookIndex) {
     showEmptyLibrary("Could not open " + slug);
     return;
   }
+  setLastActivity(LastActivity::SPEED);
   state = AppState::SPEED_READ;
   // Presses latched while reading or in the menu are not meant for this.
   input::clearLatched();
@@ -990,28 +1137,6 @@ void leaveSpeedRead() {
   input::clearLatched();
   state = AppState::READING;
   renderCurrentPage(true);
-}
-
-void handleSpeedPicker(Button b) {
-  int books = (int)library.size();
-  if (books == 0) {
-    openMenu();
-    return;
-  }
-  int count = books + speedSettingTiles();  // + Words, Speed (, Mode)
-  if (speedCursor >= count) speedCursor = count - 1;
-  if (moveGridCursor(b, speedCursor, count)) {
-    ui::renderMenu("Speed read", speedTiles(), speedCursor);
-  } else if (b == BTN_CENTER) {
-    if (speedCursor < books) {
-      startSpeedRead(speedCursor);
-      return;
-    }
-    if (speedCursor == books) rsvp::cycleWords();
-    else if (speedCursor == books + 1) rsvp::cycleWpm();
-    else rsvp::cycleMode();
-    ui::renderMenu("Speed read", speedTiles(), speedCursor);
-  }
 }
 
 // ---------------------------------------------------------------- screen
@@ -1052,7 +1177,7 @@ void switchPanel(uint8_t id) {
     ui::renderMessage("screen", lines);
     waitForButtonOr(3000);
     input::flush();
-    openMenu();
+    openMenuPageAt(MenuPage::SETTINGS, MenuAction::SCREEN);
     return;
   }
   clearStoredRotation();
@@ -1085,7 +1210,43 @@ void handleScreenPicker(Button b) {
     switchPanel((uint8_t)screenCursor);
     return;
   }
-  openMenu();
+  openMenuPageAt(MenuPage::SETTINGS, MenuAction::SCREEN);
+}
+
+// Where Back goes from each page, and the tile it lands on there.
+void menuBack() {
+  switch (menuPage) {
+    case MenuPage::BOOKS:
+      openMenuPageAt(MenuPage::MAIN, MenuAction::BOOKS);
+      break;
+    case MenuPage::READ:
+      if (panel::speedReadSupported()) {
+        openMenuPageAt(MenuPage::BOOKS, MenuAction::READ_MENU);
+      } else {
+        openMenuPageAt(MenuPage::MAIN, MenuAction::BOOKS);
+      }
+      break;
+    case MenuPage::SPEED:
+      openMenuPageAt(MenuPage::BOOKS, MenuAction::SPEED_MENU);
+      break;
+    case MenuPage::SPEED_BOOK:
+      openMenuPageAt(MenuPage::SPEED, MenuAction::SPEED_BOOK);
+      break;
+    case MenuPage::SETTINGS:
+      openMenuPageAt(MenuPage::MAIN, MenuAction::SETTINGS);
+      break;
+    case MenuPage::MAIN:
+    default:
+      openMenu();
+      break;
+  }
+}
+
+// Page view of the open book, counted as the reader's choice for Resume.
+void resumeReading() {
+  setLastActivity(LastActivity::READING);
+  state = AppState::READING;
+  renderCurrentPage(true);
 }
 
 void handleMenu(Button b) {
@@ -1093,93 +1254,141 @@ void handleMenu(Button b) {
   int count = (int)rows.size();
   if (menuCursor >= count) menuCursor = count - 1;
 
-  // There is no back button: the menu is left via the Resume tile.
+  // There is no back button: the main menu is left via the Resume tile, a
+  // submenu via its Back tile.
   if (moveGridCursor(b, menuCursor, count)) {
-    ui::renderMenu(sensorHeader(), labelsOf(rows), menuCursor);
+    renderMenuPage();
     return;
   }
+  if (b != BTN_CENTER) return;
 
-  switch (b) {
-    case BTN_CENTER: {
-      const MenuRow &row = rows[menuCursor];
-      switch (row.action) {
-        case MenuAction::RESUME:
-          if (book.isOpen()) {
-            state = AppState::READING;
-            renderCurrentPage(true);
-          } else {
-            showEmptyLibrary("");
-          }
-          break;
-        case MenuAction::SPEED_READ:
-          openSpeedPicker();
-          break;
-        case MenuAction::NUMBERS:
-          openNumbers();
-          break;
-        case MenuAction::OPEN_BOOK:
-          if (row.bookIndex >= 0 && row.bookIndex < (int)library.size()) {
-            String slug = library[row.bookIndex].slug;
-            if (openBook(slug)) {
-              state = AppState::READING;
-              renderCurrentPage(true);
-            } else {
-              showEmptyLibrary("Could not open " + slug);
-            }
-          }
-          break;
-        case MenuAction::TEXT_SIZE:
-          toggleTextSize();
-          break;
-        case MenuAction::SYNC_NEWS:
-          cpuFull();
-          runNewsSync();
-          menuCursor = 0;
-          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
-          break;
-        case MenuAction::WIFI_SETUP:
-          cpuFull();
-          wifi_setup::run();
-          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
-          break;
-        case MenuAction::WIFI_CHECK:
-          cpuFull();
-          wifi_check::run();
-          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
-          break;
-        case MenuAction::GAMES:
-          cpuFull();
-          games::run();
-          reloadLibraryAfterServer();
-          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
-          break;
-        case MenuAction::FLIP_SCREEN:
-          flipScreen();
-          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor, true);
-          break;
-        case MenuAction::SCREEN:
-          openScreenPicker();
-          break;
-        case MenuAction::AUTO_SYNC:
-          news_sync::setAutoSync(!news_sync::autoSyncEnabled());
-          logf("auto sync: %s\n", news_sync::autoSyncEnabled() ? "on" : "off");
-          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor, true);
-          break;
-        case MenuAction::JUMP:
-          enterJump();
-          break;
-        case MenuAction::BUTTON_TEST:
-          runButtonTest();
-          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
-          break;
-        case MenuAction::SOUND_TEST:
-          runSoundTest();
-          ui::renderMenu(sensorHeader(), labelsOf(menuRows()), menuCursor);
-          break;
+  const MenuRow &row = rows[menuCursor];
+  switch (row.action) {
+    case MenuAction::RESUME:
+      if (!book.isOpen()) {
+        showEmptyLibrary("");
+      } else if (resumeIsSpeed() && openBookIndex() >= 0) {
+        startSpeedRead(openBookIndex());
+      } else {
+        resumeReading();
       }
       break;
-    }
-    default:
+    case MenuAction::BOOKS:
+      if (panel::speedReadSupported()) {
+        openMenuPage(MenuPage::BOOKS);
+      } else {
+        openMenuPage(MenuPage::READ, max(0, openBookIndex()));
+      }
+      break;
+    case MenuAction::READ_MENU:
+      // Cursor on the open book: the likeliest pick.
+      openMenuPage(MenuPage::READ, max(0, openBookIndex()));
+      break;
+    case MenuAction::SPEED_MENU:
+      if (library.empty()) {
+        showEmptyLibrary("");
+        break;
+      }
+      openMenuPage(MenuPage::SPEED);
+      break;
+    case MenuAction::SETTINGS:
+      openMenuPage(MenuPage::SETTINGS);
+      break;
+    case MenuAction::BACK:
+      menuBack();
+      break;
+    case MenuAction::OPEN_BOOK:
+      if (row.bookIndex >= 0 && row.bookIndex < (int)library.size()) {
+        String slug = library[row.bookIndex].slug;
+        if (openBook(slug)) {
+          resumeReading();
+        } else {
+          showEmptyLibrary("Could not open " + slug);
+        }
+      }
+      break;
+    case MenuAction::SPEED_START:
+      if (openBookIndex() >= 0) {
+        startSpeedRead(openBookIndex());
+      } else {
+        openMenuPage(MenuPage::SPEED_BOOK);
+      }
+      break;
+    case MenuAction::SPEED_BOOK:
+      openMenuPage(MenuPage::SPEED_BOOK, max(0, openBookIndex()));
+      break;
+    case MenuAction::SPEED_PICK_BOOK:
+      if (row.bookIndex >= 0 && row.bookIndex < (int)library.size()) {
+        String slug = library[row.bookIndex].slug;
+        if (!(book.isOpen() && book.slug() == slug) && !openBook(slug)) {
+          showEmptyLibrary("Could not open " + slug);
+          break;
+        }
+        openMenuPageAt(MenuPage::SPEED, MenuAction::SPEED_START);
+      }
+      break;
+    case MenuAction::SPEED_WORDS:
+      rsvp::cycleWords();
+      renderMenuPage();
+      break;
+    case MenuAction::SPEED_WPM:
+      rsvp::cycleWpm();
+      renderMenuPage();
+      break;
+    case MenuAction::SPEED_MODE:
+      rsvp::cycleMode();
+      renderMenuPage();
+      break;
+    case MenuAction::NUMBERS:
+      openNumbers();
+      break;
+    case MenuAction::TEXT_SIZE:
+      setLastActivity(LastActivity::READING);
+      toggleTextSize();
+      break;
+    case MenuAction::SYNC_NEWS:
+      cpuFull();
+      runNewsSync();
+      renderMenuPage();
+      break;
+    case MenuAction::WIFI_SETUP:
+      cpuFull();
+      wifi_setup::run();
+      renderMenuPage();
+      break;
+    case MenuAction::WIFI_CHECK:
+      cpuFull();
+      wifi_check::run();
+      renderMenuPage();
+      break;
+    case MenuAction::GAMES:
+      cpuFull();
+      games::run();
+      reloadLibraryAfterServer();
+      renderMenuPage();
+      break;
+    case MenuAction::FLIP_SCREEN:
+      flipScreen();
+      renderMenuPage(true);
+      break;
+    case MenuAction::SCREEN:
+      openScreenPicker();
+      break;
+    case MenuAction::AUTO_SYNC:
+      news_sync::setAutoSync(!news_sync::autoSyncEnabled());
+      logf("auto sync: %s\n", news_sync::autoSyncEnabled() ? "on" : "off");
+      renderMenuPage(true);
+      break;
+    case MenuAction::JUMP:
+      enterJump();
+      break;
+    case MenuAction::BUTTON_TEST:
+      runButtonTest();
+      renderMenuPage();
+      break;
+    case MenuAction::SOUND_TEST:
+      runSoundTest();
+      renderMenuPage();
       break;
   }
 }
@@ -1218,6 +1427,7 @@ void handleJump(Button b) {
     return;
   }
   if (b == BTN_CENTER) {
+    setLastActivity(LastActivity::READING);
     state = AppState::READING;
     setPage((uint32_t)(jumpTarget - 1), true);
     return;
@@ -1597,9 +1807,6 @@ void loop() {
         break;
       case AppState::NUMBERS:
         handleNumbers(b);
-        break;
-      case AppState::SPEED_PICK:
-        handleSpeedPicker(b);
         break;
       case AppState::SCREEN_PICK:
         handleScreenPicker(b);

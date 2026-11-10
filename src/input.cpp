@@ -139,6 +139,24 @@ bool takeLatched(Button &out) {
 
 int lastSource() { return lastSrc; }
 
+// Physical input index of the key on the reader's `side`.
+static int shoulderInput(int side) {
+  const bool right = (side == SHOULDER_RIGHT) != padTurned;
+  return right ? INPUT_K2 : INPUT_K1;
+}
+
+int lastShoulder() {
+  if (lastSrc == shoulderInput(SHOULDER_LEFT)) return SHOULDER_LEFT;
+  if (lastSrc == shoulderInput(SHOULDER_RIGHT)) return SHOULDER_RIGHT;
+  return -1;
+}
+
+bool shoulderHeld(int side) {
+  const int i = shoulderInput(side);
+  if (!fitted(i)) return false;
+  return digitalRead(kPins[i]) != idleLevel[i];
+}
+
 void clearLatched() {
   for (int i = 0; i < NUM_INPUTS; i++) {
     latched[i] = false;

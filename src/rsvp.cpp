@@ -851,13 +851,13 @@ const char *hintFor(int tier) {
 #if defined(PINS_WIDE) && PINS_WIDE
   static const char *const HINTS[3][4] = {
       {"CENTER  EXIT TO PAGE", "CENTER EXIT", nullptr, nullptr},
-      {"UP DOWN  SPEED   /   RIGHT  WORDS   /   CENTER  PAUSE   /   2X CENTER  EXIT",
-       "UP DN SPEED  /  RIGHT WORDS  /  CENTER PAUSE  /  2X EXIT",
+      {"UP DOWN  SPEED   /   RIGHT  WORDS   /   L KEY  BACK 20   /   CENTER  PAUSE   /   2X EXIT",
+       "UP DN SPEED  /  RIGHT WORDS  /  L KEY BACK 20  /  CENTER PAUSE",
        "UP DN SPEED / RIGHT WORDS / CENTER PAUSE",
        "UP DN SPEED / CENTER PAUSE"},
-      {"CENTER  PLAY   /   UP DOWN  SPEED   /   RIGHT  WORDS   /   2X CENTER  EXIT",
-       "CENTER PLAY  /  UP DN SPEED  /  RIGHT WORDS  /  2X EXIT",
-       "CENTER PLAY / UP DN SPEED / RIGHT WORDS / 2X EXIT",
+      {"HOLD R KEY  READ   /   CENTER  PLAY   /   L KEY  BACK 20   /   UP DOWN  SPEED   /   2X EXIT",
+       "HOLD R KEY READ  /  CENTER PLAY  /  L KEY BACK 20  /  2X EXIT",
+       "HOLD R KEY READ / CENTER PLAY / 2X EXIT",
        "CENTER PLAY / 2X CENTER EXIT"},
   };
 #else
@@ -1351,9 +1351,30 @@ void driveFor(bool fast) {
 
 // Paused or ended frame: full refresh on the stock waveform, so every pixel
 // (not just the changed ones) is driven all the way and the frame holds.
+bool clearOnResume = false;  // a full ran while paused; see tick()
+
 void renderHold() {
   driveFor(false);
   render(true);
+  clearOnResume = true;
+}
+
+// Pause without a full refresh (founder, 2026-11-10: a full on every pause
+// left negative ghosts for the first ten or so words after it). The chunk on
+// glass stays; one partial on the stock waveform redraws the header with the
+// paused hints, and a frame drawn that way holds. Ghost clearing keeps its
+// own cadence while playing (fullAfter, and the real full every
+// RSVP_REAL_FULL_EVERY_MS in Turbo).
+void pauseSoft() {
+  playing = false;
+  driveFor(false);
+  ui::setSpeedCut(0);
+  ui::setSpeedPush(false);
+  render(false);
+  // The paused frame is drawn on the stock waveform, which leaves faint
+  // negatives under the next fast flashes (founder, 2026-11-10), so resume
+  // opens with the soft clear in Turbo, the same as after a held full.
+  clearOnResume = true;
 }
 
 void showEnd() {
@@ -1456,6 +1477,7 @@ void enter(Book &book, uint32_t page, uint16_t word) {
   playing = true;
   ended = false;
   fullPending = false;
+  clearOnResume = false;
   active = true;
   benchPushNext = false;
   hudKnown = false;
@@ -1488,6 +1510,8 @@ void enter(Book &book, uint32_t page, uint16_t word) {
   // Full refresh on entry: the panel is coming from a portrait frame.
   if (found) {
     showChunk(start, true);
+    // Soft clear before the first flash too (tick), for the same negatives.
+    clearOnResume = true;
   } else {
     // Nothing left to read from here: straight to the end state.
     shown.page = page;
@@ -1502,12 +1526,92 @@ void enter(Book &book, uint32_t page, uint16_t word) {
   nextDue = millis() + intervalMs();
 }
 
+#if defined(PINS_WIDE) && PINS_WIDE
+// Right shoulder key, hold to read (founder, 2026-11-10): a press that is
+// still down after BUTTON_DEBOUNCE_MS starts playback, and letting go pauses
+// it again. Only a run the key started is paused on release; one started
+// with CENTER keeps going. Read off the pin on every loop pass, because the
+// event stream only reports presses. A flash holds the loop for a few
+// hundred ms, so release is noticed at the end of the flash on glass.
+bool holdPlaying = false;
+uint32_t holdEdgeAt = 0;
+bool holdLevel = false;
+
+// True when it drew a frame (the caller treats that like a flash).
+bool pumpHoldKey() {
+  const bool raw = input::shoulderHeld(input::SHOULDER_RIGHT);
+  const uint32_t now = millis();
+  if (raw != holdLevel) {
+    if (!holdEdgeAt) holdEdgeAt = now;
+    if (now - holdEdgeAt < BUTTON_DEBOUNCE_MS) return false;
+    holdLevel = raw;
+  }
+  holdEdgeAt = 0;
+  if (holdLevel && !playing && !ended && !holdPlaying) {
+    holdPlaying = true;
+    playing = true;
+    nextDue = 0;  // next chunk straight away
+    realReset();
+    logf("speed read: hold to read\n");
+    return false;
+  }
+  if (!holdLevel && holdPlaying) {
+    holdPlaying = false;
+    if (playing) {
+      pauseSoft();
+      logf("speed read: key released, paused\n");
+      return true;
+    }
+  }
+  return false;
+}
+
+// Left shoulder key: back RSVP_KEY_BACK_WORDS words from the chunk on glass.
+// Playing carries on from there; paused (or at the end) shows that chunk.
+void keyBack() {
+  Pos p = shown;
+  for (int i = 0; i < RSVP_KEY_BACK_WORDS; i++) {
+    if (!retreat(p)) break;
+  }
+  if (!wordCount(p.page)) return;
+  ended = false;
+  if (playing) {
+    pos = p;
+    havePos = true;
+    nextDue = 0;
+  } else {
+    driveFor(false);
+    showChunk(p, true);
+    clearOnResume = true;
+  }
+  logf("speed read: back %d words, page %lu\n", RSVP_KEY_BACK_WORDS,
+       (unsigned long)(p.page + 1));
+}
+#endif
+
 bool tick() {
+#if defined(PINS_WIDE) && PINS_WIDE
+  if (pumpHoldKey()) return true;
+#endif
   if (!playing) return false;
   uint32_t now = millis();
   if (nextDue && (int32_t)(now - nextDue) < 0) return false;
   driveFor(true);  // back from a pause: flashes run fast again
   const uint32_t interval = intervalMs();
+
+  // Back from a pause that ended on a full refresh (the end screen, a paused
+  // rewind): in Turbo the full leaves negatives for the first flashes, so
+  // run the soft clear first, as after the paragraph fulls below.
+  if (clearOnResume) {
+    clearOnResume = false;
+    if (softClearOn()) {
+      current = "";
+      softClear();
+      logf("speed read: soft clear after a held full\n");
+      nextDue = millis() + interval / 2;
+      return true;
+    }
+  }
 
   if (fullPending) {
     // The sentence's last chunk has had its full interval; clear the ghosts
@@ -1571,6 +1675,18 @@ bool handle(Button b) {
   // or pauses, and a quick second CENTER tap exits to the page. Keep hintFor()
   // in step.
   static uint32_t lastCenterMs = 0;
+  // The shoulder keys have their own meaning here, not their d-pad roles
+  // (input.cpp KEY_ACTS_AS): left steps back, right is hold to read and is
+  // handled off the pin in pumpHoldKey(), so its press event is dropped.
+  switch (input::lastShoulder()) {
+    case input::SHOULDER_LEFT:
+      keyBack();
+      return false;
+    case input::SHOULDER_RIGHT:
+      return false;
+    default:
+      break;
+  }
   switch (b) {
     case BTN_UP:
     case BTN_DOWN: {
@@ -1609,9 +1725,9 @@ bool handle(Button b) {
         lastCenterMs = 0;
         return true;
       }
+      holdPlaying = false;
       if (playing) {
-        playing = false;
-        renderHold();
+        pauseSoft();
       } else {
         playing = true;
         nextDue = 0;  // next chunk straight away

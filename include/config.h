@@ -73,6 +73,8 @@ extern uint8_t DISPLAY_ROTATION;
 // Panel id (u8, see src/panel.h). Missing = the build's DEFAULT_PANEL_ID: 0,
 // the GDEH0576T81, except in [env:esp32s3_579], which builds with 2.
 #define NVS_KEY_UI_PANEL "panel"
+// What the menu's Resume tile goes back to (u8: 0 page view, 1 speed read).
+#define NVS_KEY_UI_LAST "last"
 
 // Status strip at the bottom of every screen. Same proportions as the earlier
 // landscape build: the rule sits STATUS_STRIP_H px above the bottom edge and
@@ -460,6 +462,9 @@ static const int RSVP_FULL_AFTER = 30;
 static const int RSVP_FULL_MAX = 40;
 // Chunks the paused "back" press steps back (a sentence or two).
 static const int RSVP_REWIND_CHUNKS = 10;
+// Wide reader: words the left shoulder key steps back in speed read, playing
+// or paused (the right key is hold to read).
+static const int RSVP_KEY_BACK_WORDS = 20;
 static const uint32_t RSVP_SPI_HZ = 40000000;
 static const int RSVP_LUT_TEMP = 40;
 static const int RSVP_CUT_MS = 60;
