@@ -27,7 +27,7 @@ bool overflow = false;
 
 // Help, one say() per line (each under its 160 byte buffer).
 const char *const HELP[] = {
-    "help | stat | ptemp | mode 0|1 (Normal|Turbo) | clear (drop console overrides)\n",
+    "help | stat | ptemp | mode 0|1|2 (Normal|Turbo|Super) | clear (drop console overrides)\n",
     "kp 0|1 | sw 0|1 | temp N (-1 sensor) | push | wpm N (100-1000) | words 1|2|3 | full\n",
     "log 0|1 | play | pause | bulk 0|1 | lean 0|1 | prof 0|1 | inc 0|1 | win 0|1\n",
     "blit 0|1 | blitcheck | volt 0|14-17 | np 0|1 | spi MHz (0 spec) | video [F]\n",
@@ -116,7 +116,7 @@ void stat() {
   tempText(d.tempC, t, sizeof(t));
   if (d.hasProfile) {
     say("mode %s  profile %s  LUT %s  temp at drive on %s\n",
-        d.mode == speed::Mode::TURBO ? "turbo" : "normal", d.profile, lut, t);
+        speed::modeName(d.mode), d.profile, lut, t);
   } else {
     say("no speed profiles on this panel  LUT %s\n", lut);
   }
@@ -220,8 +220,8 @@ void run(char *cmd) {
     if (!needProfile()) return;
     ptemp();
   } else if (!strcmp(cmd, "mode")) {
-    if (!needProfile() || !parseInt(arg, 0, 1, n)) return;
-    rsvp::setMode(n ? speed::Mode::TURBO : speed::Mode::NORMAL);
+    if (!needProfile() || !parseInt(arg, 0, 2, n)) return;
+    rsvp::setMode(n == 2 ? speed::Mode::SUPER : n ? speed::Mode::TURBO : speed::Mode::NORMAL);
     rsvp::benchResetStats();
     say("ok mode %d (%s)\n", n, ui::activeSpeedProfile()->name);
   } else if (!strcmp(cmd, "clear")) {

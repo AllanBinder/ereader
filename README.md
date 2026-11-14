@@ -182,13 +182,18 @@ redraws only the header (no full refresh), and in Turbo the next play starts
 with the quick soft clear so the first words come up without negative ghosts.
 
 On the wide reader (panel 2) the speed options have a Mode tile:
-Normal (the default) or "Turbo, more wear" (CENTER toggles; stored in NVS as
+Normal (the default), "Turbo, more wear" or "Super Turbo, some ghosting"
+(CENTER cycles; stored in NVS as
 `ui`/`rsvpmode`). Normal uses the panel's own partial waveform with keep power,
 single write and lean timing: safe for the glass, top speed 120 / 240 / 360
 wpm at 1 / 2 / 3 words (about 120 measured on glass at 1 word). Turbo loads a
-custom 8 frame waveform with no hold (about 190 ms a flash), top speed
-300 / 600 / 900 wpm, darker blacks and almost no ghosting, and wears the panel
-faster. Its ghost clear runs sooner (first sentence end after 30 flashes,
+custom 5 frame waveform with no hold (about 116 ms a flash), top speed
+500 / 1000 / 1500 wpm, blacks close to full and a faint trace of ghosting.
+Super Turbo is the same with 4 frames (about 96 ms a flash), top speed
+600 / 1200 / 1800 wpm, with visible ghosting. Both wear the panel faster,
+and speed read clocks SPI at 40 MHz on this panel (tuned on glass
+2026-11-14 on one unit; if words come up speckled, shorten the display
+wires). Their ghost clear runs sooner (first sentence end after 30 flashes,
 always by 45; Normal 60 and 90) and is mostly a quick black then white blink
 of about 0.4 s instead of the 2.2 s full refresh; a real full still runs on
 entry and about every 10 minutes. Changing mode clamps the
@@ -354,7 +359,7 @@ for about 8 seconds, and center saves the one you can read. Let go of center
 once the first picker screen appears; a press only counts after a release. Wiring is the same
 for both panels; on Waveshare HAT rev 2.3 or later tie the PWR pin to 3.3 V.
 Speed read is supported on the 5.76 inch panel (waveform cut) and on the
-5.79 inch bar (Normal and Turbo modes, see Speed read above); not on the
+5.79 inch bar (Normal, Turbo and Super Turbo modes, see Speed read above); not on the
 7.5 inch panel. Geometry (screen
 size, content area, text grids) is computed at boot for the active panel. A
 panel not in the table needs a code change: add an entry to the table.

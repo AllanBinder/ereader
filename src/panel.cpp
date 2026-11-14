@@ -303,11 +303,27 @@ const speed::Profile GDEY0579_NORMAL = {
 // skipPrevious is only honoured while the LUT in force is HOLD (ui.cpp): the
 // NOHOLD and BALANCED tables read the previous frame. Kept true so a soak
 // that settles on HOLD gets the tuned drive back unchanged.
+//
+// On glass 2026-11-14 (founder's unit, ~18 C estimate, speed SPI 40 MHz, soft
+// clear on), NOHOLD at 50 Hz, ms a flash and what it looked like:
+//   8 frames 177 ms  full black, no ghosting (Turbo until this date)
+//   7 frames 156 ms  a hair less black, 1 to 3% ghosting
+//   6 frames 136 ms  the same as 7
+//   5 frames 116 ms  ~95% black, under 5% ghosting, "very usable": Turbo
+//   4 frames  96 ms  noticeable artifacts: Super Turbo
+// No negatives at any of them (the soft clear is what the 6 frame run of
+// 2026-11-09 lacked). Caps are 60000 / ms a flash, rounded down to 100.
 const speed::Profile GDEY0579_TURBO = {
-    "Turbo", speed::LutKind::NOHOLD, 8, 2,  // 8 frames: on glass 2026-11-09
+    "Turbo", speed::LutKind::NOHOLD, 5, 2,
     true, true, true, true,
     -1,
-    {0, 300, 600, 900},
+    {0, 500, 1000, 1500},
+    30, 45};
+const speed::Profile GDEY0579_SUPER = {
+    "Super Turbo", speed::LutKind::NOHOLD, 4, 2,
+    true, true, true, true,
+    -1,
+    {0, 600, 1200, 1800},
     30, 45};
 #define PANEL2_WPM_MAX {0, 120, 240, 360}
 const Spec SPECS[] = {
@@ -317,16 +333,16 @@ const Spec SPECS[] = {
      {(uint16_t)RSVP_WPM_MAX_BY_WORDS[0], (uint16_t)RSVP_WPM_MAX_BY_WORDS[1],
       (uint16_t)RSVP_WPM_MAX_BY_WORDS[2], (uint16_t)RSVP_WPM_MAX_BY_WORDS[3]},
      RSVP_FULL_AFTER, RSVP_FULL_MAX, BOOK_FONT_PROFONT22, BOOK_FONT_PROFONT29,
-     createT81, nullptr, nullptr},
+     createT81, nullptr, nullptr, nullptr},
     {"Waveshare 7.5\" V2 800x480", "7.5\" Waveshare V2",
      GxEPD2_750_T7::WIDTH, GxEPD2_750_T7::HEIGHT, 1, 2, 4000000, false, 0,
      4000000, {0, 120, 240, 360}, 30, 40, BOOK_FONT_PROFONT22,
-     BOOK_FONT_PROFONT29, createWs750V2, nullptr, nullptr},
+     BOOK_FONT_PROFONT29, createWs750V2, nullptr, nullptr, nullptr},
     {"Good Display 5.79\" GDEY0579T93", "5.79\" Good Display",
      GxEPD2_579_Fast::WIDTH, GxEPD2_579_Fast::HEIGHT, 2, 10,
-     10000000, true, 0, 20000000, PANEL2_WPM_MAX, 60, 90,
+     10000000, true, 0, 40000000, PANEL2_WPM_MAX, 60, 90,
      BOOK_FONT_PROFONT22, BOOK_FONT_PROFONT29, createGdey0579,
-     &GDEY0579_NORMAL, &GDEY0579_TURBO},
+     &GDEY0579_NORMAL, &GDEY0579_TURBO, &GDEY0579_SUPER},
 };
 const uint8_t SPEC_COUNT = sizeof(SPECS) / sizeof(SPECS[0]);
 

@@ -89,6 +89,15 @@ int framesForTemp(int frames, int tempC) {
   return frames;
 }
 
+const char *modeName(Mode m) {
+  switch (m) {
+    case Mode::NORMAL: return "normal";
+    case Mode::TURBO: return "turbo";
+    case Mode::SUPER: return "super turbo";
+  }
+  return "?";
+}
+
 const char *lutKindName(LutKind k) {
   switch (k) {
     case LutKind::OTP: return "OTP";

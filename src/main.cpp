@@ -494,10 +494,11 @@ String pageOf(const BookEntry &e) {
 
 // "2 words, 300 wpm, turbo": the speed read settings in one line.
 String speedSummary() {
-  const bool turbo =
-      ui::activeSpeedProfile() && rsvp::mode() == speed::Mode::TURBO;
+  const bool fast =
+      ui::activeSpeedProfile() && rsvp::mode() != speed::Mode::NORMAL;
   return String(rsvp::words()) + " word" + (rsvp::words() > 1 ? "s" : "") +
-         ", " + String(rsvp::wpm()) + " wpm" + (turbo ? ", turbo" : "");
+         ", " + String(rsvp::wpm()) + " wpm" +
+         (fast ? String(", ") + speed::modeName(rsvp::mode()) : String(""));
 }
 
 void addMainRows(std::vector<MenuRow> &rows) {
@@ -569,8 +570,10 @@ void addSpeedRows(std::vector<MenuRow> &rows) {
   // Normal and Turbo only on a panel with speed profiles.
   if (ui::activeSpeedProfile()) {
     rows.push_back(MenuRow("Mode",
-                           rsvp::mode() == speed::Mode::TURBO ? "Turbo, more wear"
-                                                              : "Normal",
+                           rsvp::mode() == speed::Mode::SUPER
+                               ? "Super Turbo, some ghosting"
+                               : rsvp::mode() == speed::Mode::TURBO ? "Turbo, more wear"
+                                                                    : "Normal",
                            MenuAction::SPEED_MODE, -1));
   }
   rows.push_back(MenuRow("Back", "books", MenuAction::BACK, -1));

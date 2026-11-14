@@ -165,6 +165,7 @@ struct Spec {
   // speed fields above carry the Normal profile's values as a fallback.
   const speed::Profile *speedNormal;
   const speed::Profile *speedTurbo;
+  const speed::Profile *speedSuper;  // nullptr = no Super Turbo on this panel
 };
 
 uint8_t count();

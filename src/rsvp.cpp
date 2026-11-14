@@ -1385,10 +1385,10 @@ void showEnd() {
   logf("speed read: end of book\n");
 }
 
-// Soft clear only where the drive hooks run a custom LUT (Turbo).
+// Soft clear only where the drive hooks run a custom LUT (Turbo, Super Turbo).
 bool softClearOn() {
   return benchSoftClear && ui::speedHooksActive() && ui::activeSpeedProfile() &&
-         ui::speedMode() == speed::Mode::TURBO;
+         ui::speedMode() != speed::Mode::NORMAL;
 }
 
 // Two drive all partials: the whole screen black, then `current` (the blank
@@ -1423,7 +1423,9 @@ void begin() {
   // The mode first: the top speed below depends on it. Stored on every
   // panel (a panel without profiles ignores it), so a mode picked on the
   // 5.79 inch bar survives a trip to another panel.
-  ui::setSpeedMode(m == (int)speed::Mode::TURBO ? speed::Mode::TURBO : speed::Mode::NORMAL);
+  ui::setSpeedMode(m == (int)speed::Mode::SUPER   ? speed::Mode::SUPER
+                   : m == (int)speed::Mode::TURBO ? speed::Mode::TURBO
+                                                  : speed::Mode::NORMAL);
   wordsPerFlash = constrain(n, 1, 3);
   wpmValue = constrain(v, RSVP_WPM_MIN, wpmMax());
 }
@@ -1440,8 +1442,7 @@ void setMode(speed::Mode m) {
   const int was = wpmValue;
   wpmValue = constrain(wpmValue, RSVP_WPM_MIN, benchUncapped ? BENCH_WPM_MAX : wpmMax());
   if (wpmValue != was && !benchUncapped) saveWpm();
-  logf("speed read: %s mode, %d wpm\n", m == speed::Mode::TURBO ? "turbo" : "normal",
-       wpmValue);
+  logf("speed read: %s mode, %d wpm\n", speed::modeName(m), wpmValue);
   // Paused or ended in speed read: show the new settings now (the drive is
   // off then, as after benchSetWpm). While playing the next flash does.
   if (active && !playing) render(false);
@@ -1449,7 +1450,12 @@ void setMode(speed::Mode m) {
 
 void cycleMode() {
   if (!ui::activeSpeedProfile()) return;
-  setMode(ui::speedMode() == speed::Mode::TURBO ? speed::Mode::NORMAL : speed::Mode::TURBO);
+  // Normal, Turbo, Super Turbo (where the panel has it), back to Normal.
+  const speed::Mode m = ui::speedMode();
+  const bool hasSuper = panel::activeSpec().speedSuper != nullptr;
+  setMode(m == speed::Mode::NORMAL                ? speed::Mode::TURBO
+          : (m == speed::Mode::TURBO && hasSuper) ? speed::Mode::SUPER
+                                                  : speed::Mode::NORMAL);
 }
 
 int wpm() { return wpmValue; }

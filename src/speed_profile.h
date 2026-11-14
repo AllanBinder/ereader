@@ -14,7 +14,10 @@
 
 namespace speed {
 
-enum class Mode : uint8_t { NORMAL = 0, TURBO = 1 };
+enum class Mode : uint8_t { NORMAL = 0, TURBO = 1, SUPER = 2 };
+
+// "normal", "turbo", "super turbo" (logs, the console, the menu summary).
+const char *modeName(Mode m);
 
 // Partial waveform kinds. OTP is the panel's own partial waveform; the other
 // three are built by buildLut below.

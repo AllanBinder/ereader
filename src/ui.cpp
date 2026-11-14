@@ -669,7 +669,9 @@ speed::Mode speedMode() { return speedModeSet; }
 
 const speed::Profile *activeSpeedProfile() {
   const panel::Spec &s = panel::activeSpec();
-  if (speedModeSet == speed::Mode::TURBO && s.speedTurbo) return s.speedTurbo;
+  if (speedModeSet == speed::Mode::SUPER && s.speedSuper) return s.speedSuper;
+  // Super Turbo on a panel without it falls back to Turbo.
+  if (speedModeSet != speed::Mode::NORMAL && s.speedTurbo) return s.speedTurbo;
   return s.speedNormal;
 }
 
